@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent, createPiAiCompatRuntime, toModelHandle } from "@mariozechner/pi-agent-core";
 import { getModel } from "@mariozechner/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.js";
@@ -50,10 +50,11 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		const agent = new Agent({
 			getApiKey: () => API_KEY,
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "You are a helpful assistant. Be concise.",
 				tools: codingTools,
 			},
+			runtime: createPiAiCompatRuntime(),
 		});
 
 		sessionManager = inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir);

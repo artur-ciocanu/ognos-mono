@@ -165,7 +165,12 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Model openai/gpt-5.2 not found", "warning");
 			}
 
-			const apiKey = model ? await ctx.modelRegistry.getApiKey(model) : undefined;
+			const apiKey = model
+				? await ctx.modelRegistry.getApiKey({
+						provider: model.provider,
+						authProvider: model.provider,
+					})
+				: undefined;
 			if (!apiKey && ctx.hasUI) {
 				ctx.ui.notify("No API key for openai/gpt-5.2", "warning");
 			}

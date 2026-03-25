@@ -23,6 +23,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
+import type { PersistedModelReference } from "./model-handle.js";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -59,6 +60,8 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
+	modelHandleId?: string;
+	authProvider?: string;
 	provider: string;
 	modelId: string;
 }
@@ -159,7 +162,7 @@ export interface SessionTreeNode {
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
-	model: { provider: string; modelId: string } | null;
+	model: PersistedModelReference | null;
 }
 
 export interface SessionInfo {
@@ -346,16 +349,33 @@ export function buildSessionContext(
 
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
+	let model: PersistedModelReference | null = null;
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
+			model = {
+				modelHandleId: entry.modelHandleId,
+				authProvider: entry.authProvider ?? entry.provider,
+				provider: entry.provider,
+				modelId: entry.modelId,
+			};
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
+			const snapshot = {
+				authProvider: entry.message.provider,
+				provider: entry.message.provider,
+				modelId: entry.message.model,
+			} satisfies PersistedModelReference;
+
+			if (
+				!model ||
+				model.modelId !== snapshot.modelId ||
+				(model.authProvider ?? model.provider) !== snapshot.authProvider
+			) {
+				model = snapshot;
+			}
 		} else if (entry.type === "compaction") {
 			compaction = entry;
 		}
@@ -846,14 +866,16 @@ export class SessionManager {
 	}
 
 	/** Append a model change as child of current leaf, then advance leaf. Returns entry id. */
-	appendModelChange(provider: string, modelId: string): string {
+	appendModelChange(model: PersistedModelReference): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			provider,
-			modelId,
+			modelHandleId: model.modelHandleId,
+			authProvider: model.authProvider,
+			provider: model.provider ?? model.authProvider ?? "runtime",
+			modelId: model.modelId,
 		};
 		this._appendEntry(entry);
 		return entry.id;

@@ -4,5 +4,7 @@ export * from "./agent.js";
 export * from "./agent-loop.js";
 // Proxy utilities
 export * from "./proxy.js";
+// Runtime bridge helpers
+export * from "./runtime-bridge.js";
 // Types
 export * from "./types.js";

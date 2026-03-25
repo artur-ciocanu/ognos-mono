@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import type { PersistedModelReference } from "./model-handle.js";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -64,6 +65,7 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
+	defaultModelSelection?: PersistedModelReference;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	transport?: TransportSetting; // default: "sse"
 	steeringMode?: "all" | "one-at-a-time";
@@ -538,6 +540,14 @@ export class SettingsManager {
 		return this.settings.defaultModel;
 	}
 
+	getDefaultModelHandleId(): string | undefined {
+		return this.settings.defaultModel;
+	}
+
+	getDefaultModelSelection(): PersistedModelReference | undefined {
+		return this.settings.defaultModelSelection;
+	}
+
 	setDefaultProvider(provider: string): void {
 		this.globalSettings.defaultProvider = provider;
 		this.markModified("defaultProvider");
@@ -550,9 +560,44 @@ export class SettingsManager {
 		this.save();
 	}
 
+	setDefaultModelHandleId(modelHandleId: string, authProvider?: string, modelId?: string, provider?: string): void {
+		this.globalSettings.defaultModel = modelHandleId;
+		this.markModified("defaultModel");
+		if (authProvider !== undefined) {
+			this.globalSettings.defaultProvider = authProvider;
+			this.markModified("defaultProvider");
+		}
+		if (modelId !== undefined) {
+			this.globalSettings.defaultModelSelection = {
+				modelHandleId,
+				authProvider,
+				provider: provider ?? authProvider,
+				modelId,
+			};
+			this.markModified("defaultModelSelection");
+		}
+		this.save();
+	}
+
 	setDefaultModelAndProvider(provider: string, modelId: string): void {
 		this.globalSettings.defaultProvider = provider;
 		this.globalSettings.defaultModel = modelId;
+		this.globalSettings.defaultModelSelection = {
+			authProvider: provider,
+			provider,
+			modelId,
+		};
+		this.markModified("defaultProvider");
+		this.markModified("defaultModel");
+		this.markModified("defaultModelSelection");
+		this.save();
+	}
+
+	setDefaultModelSelection(reference: PersistedModelReference): void {
+		this.globalSettings.defaultModelSelection = structuredClone(reference);
+		this.globalSettings.defaultProvider = reference.authProvider ?? reference.provider;
+		this.globalSettings.defaultModel = reference.modelHandleId ?? reference.modelId;
+		this.markModified("defaultModelSelection");
 		this.markModified("defaultProvider");
 		this.markModified("defaultModel");
 		this.save();

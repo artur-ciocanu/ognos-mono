@@ -23,8 +23,8 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent } from "@mariozechner/pi-ai";
+import { resetApiProviders } from "@mariozechner/pi-ai";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -69,6 +69,16 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
+import {
+	areModelHandlesEqual,
+	type CodingAgentModelHandle,
+	type CompatiblePiModel,
+	getAuthProvider,
+	isAssistantContextOverflow,
+	normalizeModelHandle,
+	supportsXhighThinking,
+	toPersistedModelReference,
+} from "./model-handle.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
@@ -136,7 +146,7 @@ export interface AgentSessionConfig {
 	settingsManager: SettingsManager;
 	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
-	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
@@ -177,7 +187,7 @@ export interface PromptOptions {
 
 /** Result from cycleModel() */
 export interface ModelCycleResult {
-	model: Model<any>;
+	model: CodingAgentModelHandle;
 	thinkingLevel: ThinkingLevel;
 	/** Whether cycling through scoped models (--models flag) or all available */
 	isScoped: boolean;
@@ -227,7 +237,7 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 
-	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	private _scopedModels: Array<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }>;
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -684,8 +694,8 @@ export class AgentSession {
 	}
 
 	/** Current model (may be undefined if not yet selected) */
-	get model(): Model<any> | undefined {
-		return this.agent.state.model;
+	get model(): CodingAgentModelHandle | undefined {
+		return normalizeModelHandle(this.agent.state.model);
 	}
 
 	/** Current thinking level */
@@ -795,12 +805,12 @@ export class AgentSession {
 	}
 
 	/** Scoped models for cycling (from --models flag) */
-	get scopedModels(): ReadonlyArray<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> {
+	get scopedModels(): ReadonlyArray<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }> {
 		return this._scopedModels;
 	}
 
 	/** Update scoped models for cycling */
-	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(scopedModels: Array<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
 
@@ -949,16 +959,17 @@ export class AgentSession {
 		// Validate API key
 		const apiKey = await this._modelRegistry.getApiKey(this.model);
 		if (!apiKey) {
+			const authProvider = getAuthProvider(this.model) ?? this.model.provider;
 			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
 			if (isOAuth) {
 				throw new Error(
-					`Authentication failed for "${this.model.provider}". ` +
+					`Authentication failed for "${authProvider}". ` +
 						`Credentials may have expired or network is unavailable. ` +
-						`Run '/login ${this.model.provider}' to re-authenticate.`,
+						`Run '/login ${authProvider}' to re-authenticate.`,
 				);
 			}
 			throw new Error(
-				`No API key found for ${this.model.provider}.\n\n` +
+				`No API key found for ${authProvider}.\n\n` +
 					`Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}`,
 			);
 		}
@@ -1368,12 +1379,12 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _emitModelSelect(
-		nextModel: Model<any>,
-		previousModel: Model<any> | undefined,
+		nextModel: CodingAgentModelHandle,
+		previousModel: CodingAgentModelHandle | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
 		if (!this._extensionRunner) return;
-		if (modelsAreEqual(previousModel, nextModel)) return;
+		if (areModelHandlesEqual(previousModel, nextModel)) return;
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -1387,22 +1398,29 @@ export class AgentSession {
 	 * Validates API key, saves to session and settings.
 	 * @throws Error if no API key available for the model
 	 */
-	async setModel(model: Model<any>): Promise<void> {
-		const apiKey = await this._modelRegistry.getApiKey(model);
+	async setModel(model: CodingAgentModelHandle | CompatiblePiModel): Promise<void> {
+		const normalizedModel = normalizeModelHandle(model);
+		if (!normalizedModel) {
+			throw new Error("No model selected");
+		}
+
+		const apiKey = await this._modelRegistry.getApiKey(normalizedModel);
 		if (!apiKey) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
+			throw new Error(
+				`No API key for ${getAuthProvider(normalizedModel) ?? normalizedModel.provider}/${normalizedModel.id}`,
+			);
 		}
 
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.setModel(model);
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.agent.setModel(normalizedModel);
+		this.sessionManager.appendModelChange(toPersistedModelReference(normalizedModel));
+		this.settingsManager.setDefaultModelSelection(toPersistedModelReference(normalizedModel));
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
 
-		await this._emitModelSelect(model, previousModel, "set");
+		await this._emitModelSelect(normalizedModel, previousModel, "set");
 	}
 
 	/**
@@ -1418,12 +1436,14 @@ export class AgentSession {
 		return this._cycleAvailableModel(direction);
 	}
 
-	private async _getScopedModelsWithApiKey(): Promise<Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>> {
+	private async _getScopedModelsWithApiKey(): Promise<
+		Array<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }>
+	> {
 		const apiKeysByProvider = new Map<string, string | undefined>();
-		const result: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> = [];
+		const result: Array<{ model: CodingAgentModelHandle; thinkingLevel?: ThinkingLevel }> = [];
 
 		for (const scoped of this._scopedModels) {
-			const provider = scoped.model.provider;
+			const provider = getAuthProvider(scoped.model) ?? scoped.model.provider;
 			let apiKey: string | undefined;
 			if (apiKeysByProvider.has(provider)) {
 				apiKey = apiKeysByProvider.get(provider);
@@ -1445,7 +1465,7 @@ export class AgentSession {
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
+		let currentIndex = scopedModels.findIndex((sm) => areModelHandlesEqual(sm.model, currentModel));
 
 		if (currentIndex === -1) currentIndex = 0;
 		const len = scopedModels.length;
@@ -1455,8 +1475,8 @@ export class AgentSession {
 
 		// Apply model
 		this.agent.setModel(next.model);
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
-		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
+		this.sessionManager.appendModelChange(toPersistedModelReference(next.model));
+		this.settingsManager.setDefaultModelSelection(toPersistedModelReference(next.model));
 
 		// Apply thinking level.
 		// - Explicit scoped model thinking level overrides current session level
@@ -1474,7 +1494,7 @@ export class AgentSession {
 		if (availableModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
+		let currentIndex = availableModels.findIndex((m) => areModelHandlesEqual(m, currentModel));
 
 		if (currentIndex === -1) currentIndex = 0;
 		const len = availableModels.length;
@@ -1483,13 +1503,13 @@ export class AgentSession {
 
 		const apiKey = await this._modelRegistry.getApiKey(nextModel);
 		if (!apiKey) {
-			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
+			throw new Error(`No API key for ${getAuthProvider(nextModel) ?? nextModel.provider}/${nextModel.id}`);
 		}
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.setModel(nextModel);
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
-		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
+		this.sessionManager.appendModelChange(toPersistedModelReference(nextModel));
+		this.settingsManager.setDefaultModelSelection(toPersistedModelReference(nextModel));
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
@@ -1554,7 +1574,7 @@ export class AgentSession {
 	 * Check if current model supports xhigh thinking level.
 	 */
 	supportsXhighThinking(): boolean {
-		return this.model ? supportsXhigh(this.model) : false;
+		return supportsXhighThinking(this.model);
 	}
 
 	/**
@@ -1635,7 +1655,7 @@ export class AgentSession {
 
 			const apiKey = await this._modelRegistry.getApiKey(this.model);
 			if (!apiKey) {
-				throw new Error(`No API key for ${this.model.provider}`);
+				throw new Error(`No API key for ${getAuthProvider(this.model) ?? this.model.provider}`);
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -1688,10 +1708,11 @@ export class AgentSession {
 				// Generate compaction result
 				const result = await compact(
 					preparation,
-					this.model,
+					this.model.raw,
 					apiKey,
 					customInstructions,
 					this._compactionAbortController.signal,
+					this.agent.runtime,
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -1786,7 +1807,7 @@ export class AgentSession {
 		}
 
 		// Case 1: Overflow - LLM returned context overflow error
-		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
+		if (sameModel && isAssistantContextOverflow(assistantMessage, contextWindow)) {
 			if (this._overflowRecoveryAttempted) {
 				this._emit({
 					type: "auto_compaction_end",
@@ -1905,10 +1926,11 @@ export class AgentSession {
 				// Generate compaction result
 				const compactResult = await compact(
 					preparation,
-					this.model,
+					this.model.raw,
 					apiKey,
 					undefined,
 					this._autoCompactionAbortController.signal,
+					this.agent.runtime,
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -2083,7 +2105,7 @@ export class AgentSession {
 			return;
 		}
 
-		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
+		const refreshedModel = this._modelRegistry.resolveStoredModel(toPersistedModelReference(currentModel));
 		if (!refreshedModel || refreshedModel === currentModel) {
 			return;
 		}
@@ -2155,9 +2177,13 @@ export class AgentSession {
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
-					const key = await this.modelRegistry.getApiKey(model);
+					const normalizedModel = normalizeModelHandle(model);
+					if (!normalizedModel) {
+						return false;
+					}
+					const key = await this.modelRegistry.getApiKey(normalizedModel);
 					if (!key) return false;
-					await this.setModel(model);
+					await this.setModel(normalizedModel);
 					return true;
 				},
 				getThinkingLevel: () => this.thinkingLevel,
@@ -2372,7 +2398,7 @@ export class AgentSession {
 
 		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
+		if (isAssistantContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors, fetch failed, terminated, retry delay exceeded
@@ -2658,10 +2684,7 @@ export class AgentSession {
 		// Restore model if saved
 		if (sessionContext.model) {
 			const previousModel = this.model;
-			const availableModels = await this._modelRegistry.getAvailable();
-			const match = availableModels.find(
-				(m) => m.provider === sessionContext.model!.provider && m.id === sessionContext.model!.modelId,
-			);
+			const match = this._modelRegistry.resolveStoredModel(sessionContext.model);
 			if (match) {
 				this.agent.setModel(match);
 				await this._emitModelSelect(match, previousModel, "restore");
@@ -2858,16 +2881,17 @@ export class AgentSession {
 			const model = this.model!;
 			const apiKey = await this._modelRegistry.getApiKey(model);
 			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
+				throw new Error(`No API key for ${getAuthProvider(model) ?? model.provider}`);
 			}
 			const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
 			const result = await generateBranchSummary(entriesToSummarize, {
-				model,
+				model: model.raw,
 				apiKey,
 				signal: this._branchSummaryAbortController.signal,
 				customInstructions,
 				replaceInstructions,
 				reserveTokens: branchSummarySettings.reserveTokens,
+				runtime: this.agent.runtime,
 			});
 			this._branchSummaryAbortController = undefined;
 			if (result.aborted) {

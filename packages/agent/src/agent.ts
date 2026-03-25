@@ -1,20 +1,20 @@
 /**
  * Agent class that uses the agent-loop directly.
- * No transport abstraction - calls streamSimple via the loop.
+ * No transport abstraction - calls the configured runtime via the loop.
  */
 
-import {
-	getModel,
-	type ImageContent,
-	type Message,
-	type Model,
-	type SimpleStreamOptions,
-	streamSimple,
-	type TextContent,
-	type ThinkingBudgets,
-	type Transport,
-} from "@mariozechner/pi-ai";
+import type { ImageContent, Message, TextContent, ThinkingBudgets, Transport } from "@mariozechner/pi-ai";
+import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import {
+	type AgentRuntime,
+	type AgentRuntimeOptions,
+	createAssistantMessageShell,
+	createAssistantUsage,
+	createPlaceholderModelHandle,
+	createUnconfiguredRuntime,
+	getModelMetadata,
+} from "./runtime-bridge.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -26,7 +26,6 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
-	StreamFn,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "./types.js";
@@ -63,10 +62,8 @@ export interface AgentOptions {
 	 */
 	followUpMode?: "all" | "one-at-a-time";
 
-	/**
-	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
-	 */
-	streamFn?: StreamFn;
+	/** Custom runtime implementation. Required for execution unless a higher layer injects one later. */
+	runtime?: AgentRuntime;
 
 	/**
 	 * Optional session identifier forwarded to LLM providers.
@@ -78,12 +75,12 @@ export interface AgentOptions {
 	 * Resolves an API key dynamically for each LLM call.
 	 * Useful for expiring tokens (e.g., GitHub Copilot OAuth).
 	 */
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (provider: string, model?: ModelHandle) => Promise<string | undefined> | string | undefined;
 
 	/**
 	 * Inspect or replace provider payloads before they are sent.
 	 */
-	onPayload?: SimpleStreamOptions["onPayload"];
+	onPayload?: AgentRuntimeOptions["onPayload"];
 
 	/**
 	 * Custom token budgets for thinking levels (token-based providers only).
@@ -116,7 +113,7 @@ export interface AgentOptions {
 export class Agent {
 	private _state: AgentState = {
 		systemPrompt: "",
-		model: getModel("google", "gemini-2.5-flash-lite-preview-06-17"),
+		model: createPlaceholderModelHandle(),
 		thinkingLevel: "off",
 		tools: [],
 		messages: [],
@@ -134,10 +131,10 @@ export class Agent {
 	private followUpQueue: AgentMessage[] = [];
 	private steeringMode: "all" | "one-at-a-time";
 	private followUpMode: "all" | "one-at-a-time";
-	public streamFn: StreamFn;
+	public runtime: AgentRuntime;
 	private _sessionId?: string;
-	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
-	private _onPayload?: SimpleStreamOptions["onPayload"];
+	public getApiKey?: (provider: string, model?: ModelHandle) => Promise<string | undefined> | string | undefined;
+	private _onPayload?: AgentRuntimeOptions["onPayload"];
 	private runningPrompt?: Promise<void>;
 	private resolveRunningPrompt?: () => void;
 	private _thinkingBudgets?: ThinkingBudgets;
@@ -159,7 +156,7 @@ export class Agent {
 		this.transformContext = opts.transformContext;
 		this.steeringMode = opts.steeringMode || "one-at-a-time";
 		this.followUpMode = opts.followUpMode || "one-at-a-time";
-		this.streamFn = opts.streamFn || streamSimple;
+		this.runtime = opts.runtime || createUnconfiguredRuntime();
 		this._sessionId = opts.sessionId;
 		this.getApiKey = opts.getApiKey;
 		this._onPayload = opts.onPayload;
@@ -267,7 +264,7 @@ export class Agent {
 		this._state.systemPrompt = v;
 	}
 
-	setModel(m: Model<any>) {
+	setModel(m: ModelHandle) {
 		this._state.model = m;
 	}
 
@@ -291,7 +288,7 @@ export class Agent {
 		return this.followUpMode;
 	}
 
-	setTools(t: AgentTool<any>[]) {
+	setTools(t: AgentTool[]) {
 		this._state.tools = t;
 	}
 
@@ -486,8 +483,8 @@ export class Agent {
 			}
 
 			case "turn_end":
-				if (event.message.role === "assistant" && (event.message as any).errorMessage) {
-					this._state.error = (event.message as any).errorMessage;
+				if (event.message.role === "assistant" && event.message.errorMessage) {
+					this._state.error = event.message.errorMessage;
 				}
 				break;
 
@@ -560,7 +557,7 @@ export class Agent {
 					config,
 					async (event) => this._processLoopEvent(event),
 					this.abortController.signal,
-					this.streamFn,
+					this.runtime,
 				);
 			} else {
 				await runAgentLoopContinue(
@@ -568,31 +565,25 @@ export class Agent {
 					config,
 					async (event) => this._processLoopEvent(event),
 					this.abortController.signal,
-					this.streamFn,
+					this.runtime,
 				);
 			}
-		} catch (err: any) {
+		} catch (err: unknown) {
+			const metadata = getModelMetadata(model);
 			const errorMsg: AgentMessage = {
-				role: "assistant",
+				...createAssistantMessageShell(model),
 				content: [{ type: "text", text: "" }],
-				api: model.api,
-				provider: model.provider,
+				api: metadata.api,
+				provider: metadata.provider,
 				model: model.id,
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
+				usage: createAssistantUsage(),
 				stopReason: this.abortController?.signal.aborted ? "aborted" : "error",
-				errorMessage: err?.message || String(err),
+				errorMessage: err instanceof Error ? err.message : String(err),
 				timestamp: Date.now(),
-			} as AgentMessage;
+			};
 
 			this.appendMessage(errorMsg);
-			this._state.error = err?.message || String(err);
+			this._state.error = err instanceof Error ? err.message : String(err);
 			this.emit({ type: "agent_end", messages: [errorMsg] });
 		} finally {
 			this._state.isStreaming = false;

@@ -1,20 +1,14 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@mariozechner/pi-ai";
+import { type AssistantMessage, getModel } from "@mariozechner/pi-ai";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.js";
-
-// Mock stream that mimics AssistantMessageEventStream
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
+import {
+	Agent,
+	type AgentRuntime,
+	type AgentRuntimeEvent,
+	type AgentTool,
+	createPiAiCompatRuntime,
+	toModelHandle,
+} from "../src/index.js";
 
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
@@ -36,6 +30,47 @@ function createAssistantMessage(text: string): AssistantMessage {
 	};
 }
 
+function createRuntime(...responses: AssistantMessage[]): AgentRuntime {
+	let index = 0;
+
+	return {
+		async *stream(_model, _context, options) {
+			const message = responses[Math.min(index, responses.length - 1)];
+			index++;
+
+			yield { type: "start" } satisfies AgentRuntimeEvent;
+			yield { type: "text_start", id: "text-0" } satisfies AgentRuntimeEvent;
+			if (message.content[0]?.type === "text" && message.content[0].text.length > 0) {
+				yield {
+					type: "text_delta",
+					id: "text-0",
+					delta: message.content[0].text,
+				} satisfies AgentRuntimeEvent;
+			}
+
+			while (!options?.signal?.aborted && message.content[0]?.type === "text" && message.content[0].text === "") {
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+
+			if (options?.signal?.aborted) {
+				yield { type: "error", error: new Error("Aborted") } satisfies AgentRuntimeEvent;
+				return;
+			}
+
+			yield { type: "text_end", id: "text-0" } satisfies AgentRuntimeEvent;
+			yield {
+				type: "done",
+				usage: {
+					inputTokens: 0,
+					outputTokens: 0,
+					cachedInputTokens: 0,
+				},
+				reason: "stop",
+			} satisfies AgentRuntimeEvent;
+		},
+	};
+}
+
 describe("Agent", () => {
 	it("should create an agent instance with default state", () => {
 		const agent = new Agent();
@@ -52,8 +87,22 @@ describe("Agent", () => {
 		expect(agent.state.error).toBeUndefined();
 	});
 
+	it("should fail clearly when execution starts without a runtime", async () => {
+		const agent = new Agent();
+
+		await expect(agent.prompt("Hello")).resolves.toBeUndefined();
+		expect(agent.state.error).toBe("No runtime configured. Pass `runtime` to Agent or AgentLoopConfig.");
+
+		const lastMessage = agent.state.messages[agent.state.messages.length - 1];
+		expect(lastMessage?.role).toBe("assistant");
+		if (lastMessage?.role === "assistant") {
+			expect(lastMessage.stopReason).toBe("error");
+			expect(lastMessage.errorMessage).toBe("No runtime configured. Pass `runtime` to Agent or AgentLoopConfig.");
+		}
+	});
+
 	it("should create an agent instance with custom initial state", () => {
-		const customModel = getModel("openai", "gpt-4o-mini");
+		const customModel = toModelHandle(getModel("openai", "gpt-4o-mini"));
 		const agent = new Agent({
 			initialState: {
 				systemPrompt: "You are a helpful assistant.",
@@ -97,7 +146,7 @@ describe("Agent", () => {
 		expect(agent.state.systemPrompt).toBe("Custom prompt");
 
 		// Test setModel
-		const newModel = getModel("google", "gemini-2.5-flash");
+		const newModel = toModelHandle(getModel("google", "gemini-2.5-flash"));
 		agent.setModel(newModel);
 		expect(agent.state.model).toBe(newModel);
 
@@ -106,7 +155,20 @@ describe("Agent", () => {
 		expect(agent.state.thinkingLevel).toBe("high");
 
 		// Test setTools
-		const tools = [{ name: "test", description: "test tool" } as any];
+		const tools: AgentTool[] = [
+			{
+				name: "test",
+				label: "Test",
+				description: "test tool",
+				parameters: Type.Object({}),
+				async execute() {
+					return {
+						content: [{ type: "text", text: "ok" }],
+						details: {},
+					};
+				},
+			},
+		];
 		agent.setTools(tools);
 		expect(agent.state.tools).toBe(tools);
 
@@ -117,8 +179,8 @@ describe("Agent", () => {
 		expect(agent.state.messages).not.toBe(messages); // Should be a copy
 
 		// Test appendMessage
-		const newMessage = { role: "assistant" as const, content: [{ type: "text" as const, text: "Hi" }] };
-		agent.appendMessage(newMessage as any);
+		const newMessage = createAssistantMessage("Hi");
+		agent.appendMessage(newMessage);
 		expect(agent.state.messages).toHaveLength(2);
 		expect(agent.state.messages[1]).toBe(newMessage);
 
@@ -157,23 +219,16 @@ describe("Agent", () => {
 	it("should throw when prompt() called while streaming", async () => {
 		let abortSignal: AbortSignal | undefined;
 		const agent = new Agent({
-			// Use a stream function that responds to abort
-			streamFn: (_model, _context, options) => {
-				abortSignal = options?.signal;
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
-					// Check abort signal periodically
-					const checkAbort = () => {
-						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
-						} else {
-							setTimeout(checkAbort, 5);
-						}
-					};
-					checkAbort();
-				});
-				return stream;
+			runtime: {
+				async *stream(_model, _context, options) {
+					abortSignal = options?.signal;
+					yield { type: "start" } satisfies AgentRuntimeEvent;
+					yield { type: "text_start", id: "text-0" } satisfies AgentRuntimeEvent;
+					while (!abortSignal?.aborted) {
+						await new Promise((resolve) => setTimeout(resolve, 5));
+					}
+					yield { type: "error", error: new Error("Aborted") } satisfies AgentRuntimeEvent;
+				},
 			},
 		});
 
@@ -197,21 +252,16 @@ describe("Agent", () => {
 	it("should throw when continue() called while streaming", async () => {
 		let abortSignal: AbortSignal | undefined;
 		const agent = new Agent({
-			streamFn: (_model, _context, options) => {
-				abortSignal = options?.signal;
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
-					const checkAbort = () => {
-						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
-						} else {
-							setTimeout(checkAbort, 5);
-						}
-					};
-					checkAbort();
-				});
-				return stream;
+			runtime: {
+				async *stream(_model, _context, options) {
+					abortSignal = options?.signal;
+					yield { type: "start" } satisfies AgentRuntimeEvent;
+					yield { type: "text_start", id: "text-0" } satisfies AgentRuntimeEvent;
+					while (!abortSignal?.aborted) {
+						await new Promise((resolve) => setTimeout(resolve, 5));
+					}
+					yield { type: "error", error: new Error("Aborted") } satisfies AgentRuntimeEvent;
+				},
 			},
 		});
 
@@ -232,13 +282,7 @@ describe("Agent", () => {
 
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const agent = new Agent({
-			streamFn: () => {
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") });
-				});
-				return stream;
-			},
+			runtime: createRuntime(createAssistantMessage("Processed")),
 		});
 
 		agent.replaceMessages([
@@ -271,17 +315,14 @@ describe("Agent", () => {
 	it("continue() should keep one-at-a-time steering semantics from assistant tail", async () => {
 		let responseCount = 0;
 		const agent = new Agent({
-			streamFn: () => {
-				const stream = new MockAssistantStream();
-				responseCount++;
-				queueMicrotask(() => {
-					stream.push({
-						type: "done",
-						reason: "stop",
-						message: createAssistantMessage(`Processed ${responseCount}`),
-					});
-				});
-				return stream;
+			runtime: {
+				async *stream() {
+					responseCount++;
+					yield* createRuntime(createAssistantMessage(`Processed ${responseCount}`)).stream(
+						toModelHandle(getModel("openai", "gpt-4o-mini")),
+						{ messages: [] },
+					);
+				},
 			},
 		});
 
@@ -312,18 +353,18 @@ describe("Agent", () => {
 		expect(responseCount).toBe(2);
 	});
 
-	it("forwards sessionId to streamFn options", async () => {
+	it("forwards sessionId to runtime options", async () => {
 		let receivedSessionId: string | undefined;
 		const agent = new Agent({
 			sessionId: "session-abc",
-			streamFn: (_model, _context, options) => {
-				receivedSessionId = options?.sessionId;
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
-					const message = createAssistantMessage("ok");
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
+			runtime: {
+				async *stream(_model, _context, options) {
+					receivedSessionId = options?.sessionId;
+					yield* createRuntime(createAssistantMessage("ok")).stream(
+						toModelHandle(getModel("openai", "gpt-4o-mini")),
+						{ messages: [] },
+					);
+				},
 			},
 		});
 
@@ -336,5 +377,16 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
+	});
+
+	it("supports explicit pi-ai compatibility runtime when requested", async () => {
+		const agent = new Agent({
+			runtime: createPiAiCompatRuntime(),
+			initialState: {
+				model: toModelHandle(getModel("google", "gemini-2.5-flash")),
+			},
+		});
+
+		expect(agent.runtime).toBeDefined();
 	});
 });

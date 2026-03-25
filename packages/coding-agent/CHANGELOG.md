@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified the runtime-boundary migration: coding-agent now treats model identity as opaque handle-based state first, while keeping `pi-ai`-backed model catalogs, provider auth, `models.json` compatibility settings, and summary fallback paths during the ongoing migration.
+
 ### Fixed
 
+- Fixed `coding-agent` model registry/provider refresh to unregister only the dynamic API/OAuth providers it owns instead of resetting unrelated live `pi-ai` provider registrations, and removed the stale Bun Bedrock bootstrap hook.
+- Fixed coding-agent model selection and session restore to persist opaque model handle ids instead of relying on provider/model parsing as the canonical model identity.
 - Fixed `/export` HTML backgrounds to honor `theme.export.pageBg`, `cardBg`, and `infoBg` instead of always deriving them from `userMessageBg` ([#2565](https://github.com/badlogic/pi-mono/issues/2565))
 - Fixed interactive bash execution collapsed previews to recompute visual line wrapping at render time, so previews respect the current terminal width after resizes and split-pane width changes ([#2569](https://github.com/badlogic/pi-mono/issues/2569))
 - Fixed RPC `get_session_stats` to expose `contextUsage`, so headless clients can read actual current context-window usage instead of deriving it from token totals ([#2550](https://github.com/badlogic/pi-mono/issues/2550))

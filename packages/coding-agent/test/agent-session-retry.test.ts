@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool, toModelHandle } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { createTestResourceLoader } from "./utilities.js";
+import { createCompatRuntimeFromStreamFn, createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -77,8 +77,8 @@ describe("AgentSession retry", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: () => {
+			initialState: { model: toModelHandle(model), systemPrompt: "Test", tools: [] },
+			runtime: createCompatRuntimeFromStreamFn(() => {
 				callCount++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -96,7 +96,7 @@ describe("AgentSession retry", () => {
 					}
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();
@@ -198,8 +198,8 @@ describe("AgentSession retry", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn,
+			initialState: { model: toModelHandle(model), systemPrompt: "Test", tools: [] },
+			runtime: createCompatRuntimeFromStreamFn(streamFn),
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
@@ -250,8 +250,8 @@ describe("AgentSession retry", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: () => {
+			initialState: { model: toModelHandle(model), systemPrompt: "Test", tools: [echoTool] },
+			runtime: createCompatRuntimeFromStreamFn(() => {
 				callCount++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -283,7 +283,7 @@ describe("AgentSession retry", () => {
 					}
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();

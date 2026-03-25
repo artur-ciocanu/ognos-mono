@@ -2,8 +2,8 @@
  * List available models with optional fuzzy search
  */
 
-import type { Api, Model } from "@mariozechner/pi-ai";
 import { fuzzyFilter } from "@mariozechner/pi-tui";
+import type { CodingAgentModelHandle } from "../core/model-handle.js";
 import type { ModelRegistry } from "../core/model-registry.js";
 
 /**
@@ -33,7 +33,7 @@ export async function listModels(modelRegistry: ModelRegistry, searchPattern?: s
 	}
 
 	// Apply fuzzy filter if search pattern provided
-	let filteredModels: Model<Api>[] = models;
+	let filteredModels: CodingAgentModelHandle[] = models;
 	if (searchPattern) {
 		filteredModels = fuzzyFilter(models, searchPattern, (m) => `${m.provider} ${m.id}`);
 	}

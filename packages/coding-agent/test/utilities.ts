@@ -5,8 +5,16 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@mariozechner/pi-ai";
+import { Agent, type AgentRuntime, createPiAiCompatRuntime, toModelHandle } from "@mariozechner/pi-agent-core";
+import {
+	type AssistantMessageEventStream,
+	type Context,
+	getModel,
+	type Model,
+	type OAuthCredentials,
+	type OAuthProvider,
+	type SimpleStreamOptions,
+} from "@mariozechner/pi-ai";
 import { getOAuthApiKey } from "@mariozechner/pi-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -228,6 +236,177 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 	};
 }
 
+function isPiModel(value: unknown): value is Model<any> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"api" in value &&
+		"provider" in value &&
+		"reasoning" in value &&
+		typeof (value as { api?: unknown }).api === "string" &&
+		typeof (value as { provider?: unknown }).provider === "string" &&
+		typeof (value as { reasoning?: unknown }).reasoning === "boolean"
+	);
+}
+
+export function createCompatRuntimeFromStreamFn(
+	streamFn: (
+		model: Model<any>,
+		context: Context,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
+): AgentRuntime {
+	return {
+		configured: true,
+		async *stream(model, context, options = {}) {
+			if (!isPiModel(model.raw)) {
+				yield {
+					type: "error",
+					error: new Error("Compat runtime requires ModelHandle.raw to contain a pi-ai model"),
+				};
+				return;
+			}
+
+			const stream = await streamFn(
+				model.raw,
+				{
+					systemPrompt: "",
+					messages: context.rawMessages ?? [],
+					tools: context.tools,
+				},
+				{
+					apiKey: options.apiKey,
+					maxRetryDelayMs: options.maxRetryDelayMs,
+					maxTokens: options.maxTokens,
+					onPayload: options.onPayload ? (payload) => options.onPayload?.(payload, model) : undefined,
+					reasoning: options.reasoning === "off" ? undefined : options.reasoning,
+					sessionId: options.sessionId,
+					signal: options.signal,
+					thinkingBudgets: options.thinkingBudgets,
+					transport: options.transport,
+				},
+			);
+
+			let sawStructuredContent = false;
+
+			for await (const event of stream) {
+				switch (event.type) {
+					case "start":
+						sawStructuredContent = false;
+						yield { type: "start", messageId: event.partial.responseId };
+						break;
+					case "text_start":
+						sawStructuredContent = true;
+						yield { type: "text_start", id: `text-${event.contentIndex}` };
+						break;
+					case "text_delta":
+						sawStructuredContent = true;
+						yield { type: "text_delta", id: `text-${event.contentIndex}`, delta: event.delta };
+						break;
+					case "text_end":
+						sawStructuredContent = true;
+						yield { type: "text_end", id: `text-${event.contentIndex}` };
+						break;
+					case "thinking_start":
+						sawStructuredContent = true;
+						yield { type: "thinking_start", id: `thinking-${event.contentIndex}` };
+						break;
+					case "thinking_delta":
+						sawStructuredContent = true;
+						yield { type: "thinking_delta", id: `thinking-${event.contentIndex}`, delta: event.delta };
+						break;
+					case "thinking_end":
+						sawStructuredContent = true;
+						yield { type: "thinking_end", id: `thinking-${event.contentIndex}` };
+						break;
+					case "toolcall_start": {
+						sawStructuredContent = true;
+						const content = event.partial.content[event.contentIndex];
+						yield {
+							type: "toolcall_start",
+							id: content?.type === "toolCall" ? content.id : `tool-${event.contentIndex}`,
+							toolName: content?.type === "toolCall" ? content.name : "tool",
+						};
+						break;
+					}
+					case "toolcall_delta": {
+						sawStructuredContent = true;
+						const content = event.partial.content[event.contentIndex];
+						yield {
+							type: "toolcall_delta",
+							id: content?.type === "toolCall" ? content.id : `tool-${event.contentIndex}`,
+							delta: event.delta,
+						};
+						break;
+					}
+					case "toolcall_end":
+						sawStructuredContent = true;
+						yield { type: "toolcall_end", id: event.toolCall.id };
+						break;
+					case "done":
+						if (!sawStructuredContent) {
+							let textIndex = 0;
+							let thinkingIndex = 0;
+							for (const content of event.message.content) {
+								switch (content.type) {
+									case "text":
+										yield { type: "text_start", id: `text-${textIndex}` };
+										if (content.text.length > 0) {
+											yield { type: "text_delta", id: `text-${textIndex}`, delta: content.text };
+										}
+										yield { type: "text_end", id: `text-${textIndex}` };
+										textIndex++;
+										break;
+									case "thinking":
+										yield { type: "thinking_start", id: `thinking-${thinkingIndex}` };
+										if (content.thinking.length > 0) {
+											yield {
+												type: "thinking_delta",
+												id: `thinking-${thinkingIndex}`,
+												delta: content.thinking,
+											};
+										}
+										yield { type: "thinking_end", id: `thinking-${thinkingIndex}` };
+										thinkingIndex++;
+										break;
+									case "toolCall": {
+										const delta = JSON.stringify(content.arguments);
+										yield { type: "toolcall_start", id: content.id, toolName: content.name };
+										if (delta.length > 0) {
+											yield { type: "toolcall_delta", id: content.id, delta };
+										}
+										yield { type: "toolcall_end", id: content.id };
+										break;
+									}
+								}
+							}
+						}
+						yield {
+							type: "done",
+							messageId: event.message.responseId,
+							usage: {
+								inputTokens: event.message.usage.input,
+								outputTokens: event.message.usage.output,
+								cachedInputTokens: event.message.usage.cacheRead,
+								estimatedCost: event.message.usage.cost.total,
+							},
+							reason: event.reason,
+						};
+						sawStructuredContent = false;
+						break;
+					case "error":
+						sawStructuredContent = false;
+						yield {
+							type: "error",
+							error: new Error(event.error.errorMessage || "Compat runtime stream failed"),
+						};
+						break;
+				}
+			}
+		},
+	};
+}
+
 /**
  * Create an AgentSession for testing with proper setup and cleanup.
  * Use this for e2e tests that need real LLM calls.
@@ -240,10 +419,11 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 	const agent = new Agent({
 		getApiKey: () => API_KEY,
 		initialState: {
-			model,
+			model: toModelHandle(model),
 			systemPrompt: options.systemPrompt ?? "You are a helpful assistant. Be extremely concise.",
 			tools: codingTools,
 		},
+		runtime: createPiAiCompatRuntime(),
 	});
 
 	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir);

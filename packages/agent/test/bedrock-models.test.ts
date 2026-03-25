@@ -24,7 +24,7 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { getModels } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.js";
+import { Agent, toModelHandle } from "../src/index.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 
 // =============================================================================
@@ -157,6 +157,7 @@ describe("Amazon Bedrock Models - Agent Loop", () => {
 	if (shouldRunExtensiveTests) {
 		for (const model of allBedrockModels) {
 			const modelId = model.id;
+			const modelHandle = toModelHandle(model);
 
 			describe(`Model: ${modelId}`, () => {
 				// Skip entirely unavailable models
@@ -166,7 +167,7 @@ describe("Amazon Bedrock Models - Agent Loop", () => {
 					const agent = new Agent({
 						initialState: {
 							systemPrompt: "You are a helpful assistant. Be extremely concise.",
-							model,
+							model: modelHandle,
 							thinkingLevel: "off",
 							tools: [],
 						},
@@ -197,7 +198,7 @@ describe("Amazon Bedrock Models - Agent Loop", () => {
 						const agent = new Agent({
 							initialState: {
 								systemPrompt: "You are a helpful assistant. Be extremely concise.",
-								model,
+								model: modelHandle,
 								thinkingLevel: "medium",
 								tools: [],
 							},
@@ -232,7 +233,7 @@ describe("Amazon Bedrock Models - Agent Loop", () => {
 						const agent = new Agent({
 							initialState: {
 								systemPrompt: "You are a helpful assistant. Be extremely concise.",
-								model,
+								model: modelHandle,
 								thinkingLevel: "off",
 								tools: [],
 							},

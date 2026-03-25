@@ -1,4 +1,3 @@
-import { type Model, modelsAreEqual } from "@mariozechner/pi-ai";
 import {
 	Container,
 	type Focusable,
@@ -9,6 +8,11 @@ import {
 	Text,
 	type TUI,
 } from "@mariozechner/pi-tui";
+import {
+	areModelHandlesEqual,
+	type CodingAgentModelHandle,
+	toPersistedModelReference,
+} from "../../../core/model-handle.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import type { SettingsManager } from "../../../core/settings-manager.js";
 import { theme } from "../theme/theme.js";
@@ -18,11 +22,11 @@ import { keyHint } from "./keybinding-hints.js";
 interface ModelItem {
 	provider: string;
 	id: string;
-	model: Model<any>;
+	model: CodingAgentModelHandle;
 }
 
 interface ScopedModelItem {
-	model: Model<any>;
+	model: CodingAgentModelHandle;
 	thinkingLevel?: string;
 }
 
@@ -49,10 +53,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private activeModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
-	private currentModel?: Model<any>;
+	private currentModel?: CodingAgentModelHandle;
 	private settingsManager: SettingsManager;
 	private modelRegistry: ModelRegistry;
-	private onSelectCallback: (model: Model<any>) => void;
+	private onSelectCallback: (model: CodingAgentModelHandle) => void;
 	private onCancelCallback: () => void;
 	private errorMessage?: string;
 	private tui: TUI;
@@ -63,11 +67,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	constructor(
 		tui: TUI,
-		currentModel: Model<any> | undefined,
+		currentModel: CodingAgentModelHandle | undefined,
 		settingsManager: SettingsManager,
 		modelRegistry: ModelRegistry,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
-		onSelect: (model: Model<any>) => void,
+		onSelect: (model: CodingAgentModelHandle) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
 	) {
@@ -149,7 +153,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Load available models (built-in models still work even if models.json failed)
 		try {
 			const availableModels = await this.modelRegistry.getAvailable();
-			models = availableModels.map((model: Model<any>) => ({
+			models = availableModels.map((model) => ({
 				provider: model.provider,
 				id: model.id,
 				model,
@@ -184,8 +188,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const sorted = [...models];
 		// Sort: current model first, then by provider
 		sorted.sort((a, b) => {
-			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
-			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
+			const aIsCurrent = areModelHandlesEqual(this.currentModel, a.model);
+			const bIsCurrent = areModelHandlesEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
 			return a.provider.localeCompare(b.provider);
@@ -242,7 +246,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const isCurrent = areModelHandlesEqual(this.currentModel, item.model);
 
 			let line = "";
 			if (isSelected) {
@@ -325,9 +329,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private handleSelect(model: Model<any>): void {
+	private handleSelect(model: CodingAgentModelHandle): void {
 		// Save as new default
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.settingsManager.setDefaultModelSelection(toPersistedModelReference(model));
 		this.onSelectCallback(model);
 	}
 

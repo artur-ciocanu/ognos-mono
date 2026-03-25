@@ -5,12 +5,22 @@
 
 import {
 	type AssistantMessage,
-	type Context,
 	EventStream,
-	streamSimple,
+	parseStreamingJson,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@mariozechner/pi-ai";
+import {
+	type AgentRuntime,
+	type AgentRuntimeEvent,
+	type AgentRuntimeOptions,
+	cloneAssistantMessage,
+	createAssistantMessageShell,
+	createAssistantUsage,
+	getModelMetadata,
+	parseToolArguments,
+	toRuntimeMessages,
+} from "./runtime-bridge.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -19,7 +29,6 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
-	StreamFn,
 } from "./types.js";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
@@ -33,22 +42,29 @@ export function agentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
-
-	void runAgentLoop(
-		prompts,
-		context,
+	void resolveAgentLoopStream(
+		stream,
+		() =>
+			runAgentLoop(
+				prompts,
+				context,
+				config,
+				async (event) => {
+					stream.push(event);
+				},
+				signal,
+				runtime,
+			),
 		config,
 		async (event) => {
 			stream.push(event);
 		},
+		prompts,
 		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	);
 
 	return stream;
 }
@@ -65,7 +81,7 @@ export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -76,18 +92,25 @@ export function agentLoopContinue(
 	}
 
 	const stream = createAgentStream();
-
-	void runAgentLoopContinue(
-		context,
+	void resolveAgentLoopStream(
+		stream,
+		() =>
+			runAgentLoopContinue(
+				context,
+				config,
+				async (event) => {
+					stream.push(event);
+				},
+				signal,
+				runtime,
+			),
 		config,
 		async (event) => {
 			stream.push(event);
 		},
+		[],
 		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	);
 
 	return stream;
 }
@@ -98,7 +121,7 @@ export async function runAgentLoop(
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
@@ -113,7 +136,7 @@ export async function runAgentLoop(
 		await emit({ type: "message_end", message: prompt });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, runtime);
 	return newMessages;
 }
 
@@ -122,7 +145,7 @@ export async function runAgentLoopContinue(
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -138,7 +161,7 @@ export async function runAgentLoopContinue(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, runtime);
 	return newMessages;
 }
 
@@ -147,6 +170,47 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+}
+
+async function resolveAgentLoopStream(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	run: () => Promise<AgentMessage[]>,
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+	initialMessages: AgentMessage[],
+	signal?: AbortSignal,
+): Promise<void> {
+	try {
+		stream.end(await run());
+	} catch (error) {
+		const messages = await emitLoopFailure(config, emit, initialMessages, error, signal);
+		stream.end(messages);
+	}
+}
+
+async function emitLoopFailure(
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+	initialMessages: AgentMessage[],
+	error: unknown,
+	signal?: AbortSignal,
+): Promise<AgentMessage[]> {
+	const errorMessage = finalizeAssistantMessage(
+		config.model,
+		null,
+		createAssistantUsage(),
+		signal?.aborted ? "aborted" : "error",
+		undefined,
+		error instanceof Error ? error.message : String(error),
+	);
+
+	await emit({ type: "message_start", message: cloneAssistantMessage(errorMessage) });
+	await emit({ type: "message_end", message: errorMessage });
+	await emit({ type: "turn_end", message: errorMessage, toolResults: [] });
+
+	const messages = [...initialMessages, errorMessage];
+	await emit({ type: "agent_end", messages });
+	return messages;
 }
 
 /**
@@ -158,7 +222,7 @@ async function runLoop(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): Promise<void> {
 	let firstTurn = true;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -188,7 +252,7 @@ async function runLoop(
 			}
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, runtime);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -240,7 +304,7 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	runtime?: AgentRuntime,
 ): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
@@ -251,67 +315,247 @@ async function streamAssistantResponse(
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
 
-	// Build LLM context
-	const llmContext: Context = {
-		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
+	const runtimeContext = {
+		messages: toRuntimeMessages(llmMessages, context.systemPrompt),
 		tools: context.tools,
+		rawMessages: llmMessages,
 	};
-
-	const streamFunction = streamFn || streamSimple;
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+		(config.getApiKey ? await config.getApiKey(getModelMetadata(config.model).provider, config.model) : undefined) ||
+		config.apiKey;
 
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
+	const runtimeInstance = runtime ?? config.runtime;
+	if (!runtimeInstance) {
+		throw new Error("No runtime configured");
+	}
+
+	const runtimeOptions: AgentRuntimeOptions = {
 		apiKey: resolvedApiKey,
+		maxRetryDelayMs: config.maxRetryDelayMs,
+		onPayload: config.onPayload,
+		reasoning: config.reasoning,
+		sessionId: config.sessionId,
 		signal,
-	});
+		thinkingBudgets: config.thinkingBudgets,
+		transport: config.transport,
+	};
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	let finalUsage = createAssistantUsage();
+	const contentIndexById = new Map<string, number>();
+	const toolArgumentsById = new Map<string, string>();
 
-	for await (const event of response) {
+	for await (const event of runtimeInstance.stream(config.model, runtimeContext, runtimeOptions)) {
 		switch (event.type) {
 			case "start":
-				partialMessage = event.partial;
+				partialMessage = createAssistantMessageShell(config.model);
+				partialMessage.responseId = event.messageId;
 				context.messages.push(partialMessage);
 				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
+				await emit({ type: "message_start", message: cloneAssistantMessage(partialMessage) });
 				break;
 
 			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (partialMessage) {
-					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
+				if (!partialMessage) {
+					break;
 				}
+				contentIndexById.set(event.id, partialMessage.content.length);
+				partialMessage.content.push({ type: "text", text: "" });
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "text_start",
+						contentIndex: partialMessage.content.length - 1,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
 				break;
 
-			case "done":
-			case "error": {
-				const finalMessage = await response.result();
+			case "text_delta":
+				if (!partialMessage) {
+					break;
+				}
+				updateTextContent(partialMessage, contentIndexById.get(event.id), event.delta);
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "text_delta",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						delta: event.delta,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "text_end":
+				if (!partialMessage) {
+					break;
+				}
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "text_end",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						content: getTextContent(partialMessage, contentIndexById.get(event.id)),
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "thinking_start":
+				if (!partialMessage) {
+					break;
+				}
+				contentIndexById.set(event.id, partialMessage.content.length);
+				partialMessage.content.push({ type: "thinking", thinking: "" });
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "thinking_start",
+						contentIndex: partialMessage.content.length - 1,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "thinking_delta":
+				if (!partialMessage) {
+					break;
+				}
+				updateThinkingContent(partialMessage, contentIndexById.get(event.id), event.delta);
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "thinking_delta",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						delta: event.delta,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "thinking_end":
+				if (!partialMessage) {
+					break;
+				}
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "thinking_end",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						content: getThinkingContent(partialMessage, contentIndexById.get(event.id)),
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "toolcall_start":
+				if (!partialMessage) {
+					break;
+				}
+				contentIndexById.set(event.id, partialMessage.content.length);
+				toolArgumentsById.set(event.id, "");
+				partialMessage.content.push({ type: "toolCall", id: event.id, name: event.toolName, arguments: {} });
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "toolcall_start",
+						contentIndex: partialMessage.content.length - 1,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "toolcall_delta":
+				if (!partialMessage) {
+					break;
+				}
+				updateToolCallArguments(
+					partialMessage,
+					contentIndexById.get(event.id),
+					toolArgumentsById.get(event.id) ?? "",
+					event.delta,
+				);
+				toolArgumentsById.set(event.id, `${toolArgumentsById.get(event.id) ?? ""}${event.delta}`);
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "toolcall_delta",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						delta: event.delta,
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "toolcall_end":
+				if (!partialMessage) {
+					break;
+				}
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: {
+						type: "toolcall_end",
+						contentIndex: contentIndexById.get(event.id) ?? 0,
+						toolCall: getToolCallContent(partialMessage, contentIndexById.get(event.id)),
+						partial: cloneAssistantMessage(partialMessage),
+					},
+					message: cloneAssistantMessage(partialMessage),
+				});
+				break;
+
+			case "done": {
+				finalUsage = createAssistantUsage(event.usage);
+				const finalMessage = finalizeAssistantMessage(
+					config.model,
+					partialMessage,
+					finalUsage,
+					normalizeStopReason(event.reason, inferStopReason(partialMessage)),
+					event.messageId,
+				);
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
 					context.messages.push(finalMessage);
 				}
 				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
+					await emit({ type: "message_start", message: cloneAssistantMessage(finalMessage) });
+				}
+				await emit({ type: "message_end", message: finalMessage });
+				return finalMessage;
+			}
+
+			case "error": {
+				const finalMessage = finalizeAssistantMessage(
+					config.model,
+					partialMessage,
+					finalUsage,
+					signal?.aborted ? "aborted" : "error",
+					undefined,
+					event.error.message,
+				);
+				if (addedPartial) {
+					context.messages[context.messages.length - 1] = finalMessage;
+				} else {
+					context.messages.push(finalMessage);
+					await emit({ type: "message_start", message: cloneAssistantMessage(finalMessage) });
 				}
 				await emit({ type: "message_end", message: finalMessage });
 				return finalMessage;
@@ -319,14 +563,111 @@ async function streamAssistantResponse(
 		}
 	}
 
-	const finalMessage = await response.result();
+	const finalMessage = finalizeAssistantMessage(
+		config.model,
+		partialMessage,
+		finalUsage,
+		normalizeStopReason(undefined, inferStopReason(partialMessage)),
+		partialMessage?.responseId,
+	);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
 		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
+		await emit({ type: "message_start", message: cloneAssistantMessage(finalMessage) });
 	}
 	await emit({ type: "message_end", message: finalMessage });
+	return finalMessage;
+}
+
+function updateTextContent(message: AssistantMessage, contentIndex: number | undefined, delta: string): void {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	if (content?.type === "text") {
+		content.text += delta;
+	}
+}
+
+function getTextContent(message: AssistantMessage, contentIndex: number | undefined): string {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	return content?.type === "text" ? content.text : "";
+}
+
+function updateThinkingContent(message: AssistantMessage, contentIndex: number | undefined, delta: string): void {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	if (content?.type === "thinking") {
+		content.thinking += delta;
+	}
+}
+
+function getThinkingContent(message: AssistantMessage, contentIndex: number | undefined): string {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	return content?.type === "thinking" ? content.thinking : "";
+}
+
+function updateToolCallArguments(
+	message: AssistantMessage,
+	contentIndex: number | undefined,
+	previousDelta: string,
+	delta: string,
+): void {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	if (content?.type === "toolCall") {
+		content.arguments = parseToolArguments(`${previousDelta}${delta}`);
+	}
+}
+
+function getToolCallContent(message: AssistantMessage, contentIndex: number | undefined): AgentToolCall {
+	const content = contentIndex === undefined ? undefined : message.content[contentIndex];
+	if (content?.type === "toolCall") {
+		return {
+			...content,
+			arguments: parseStreamingJson(JSON.stringify(content.arguments)) as Record<string, unknown>,
+		};
+	}
+
+	return {
+		type: "toolCall",
+		id: "missing-tool-call",
+		name: "missing-tool-call",
+		arguments: {},
+	};
+}
+
+function inferStopReason(
+	message: AssistantMessage | null,
+): NonNullable<Extract<AgentRuntimeEvent, { type: "done" }>["reason"]> {
+	if (message?.content.some((content) => content.type === "toolCall")) {
+		return "toolUse";
+	}
+
+	return "stop";
+}
+
+function normalizeStopReason(
+	stopReason: Extract<AgentRuntimeEvent, { type: "done" }>["reason"],
+	fallback: NonNullable<Extract<AgentRuntimeEvent, { type: "done" }>["reason"]>,
+): AssistantMessage["stopReason"] {
+	return stopReason ?? fallback;
+}
+
+function finalizeAssistantMessage(
+	model: AgentLoopConfig["model"],
+	partialMessage: AssistantMessage | null,
+	usage: AssistantMessage["usage"],
+	stopReason: AssistantMessage["stopReason"],
+	responseId?: string,
+	errorMessage?: string,
+): AssistantMessage {
+	const metadata = getModelMetadata(model);
+	const finalMessage = partialMessage ? cloneAssistantMessage(partialMessage) : createAssistantMessageShell(model);
+	finalMessage.api = metadata.api;
+	finalMessage.provider = metadata.provider;
+	finalMessage.model = model.id;
+	finalMessage.responseId = responseId ?? partialMessage?.responseId;
+	finalMessage.usage = usage;
+	finalMessage.stopReason = stopReason;
+	finalMessage.errorMessage = errorMessage;
+	finalMessage.timestamp = Date.now();
 	return finalMessage;
 }
 
@@ -440,18 +781,18 @@ async function executeToolCallsParallel(
 type PreparedToolCall = {
 	kind: "prepared";
 	toolCall: AgentToolCall;
-	tool: AgentTool<any>;
+	tool: AgentTool;
 	args: unknown;
 };
 
 type ImmediateToolCallOutcome = {
 	kind: "immediate";
-	result: AgentToolResult<any>;
+	result: AgentToolResult<unknown>;
 	isError: boolean;
 };
 
 type ExecutedToolCallOutcome = {
-	result: AgentToolResult<any>;
+	result: AgentToolResult<unknown>;
 	isError: boolean;
 };
 
@@ -579,7 +920,7 @@ async function finalizeExecutedToolCall(
 	return await emitToolCallOutcome(prepared.toolCall, result, isError, emit);
 }
 
-function createErrorToolResult(message: string): AgentToolResult<any> {
+function createErrorToolResult(message: string): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
 		details: {},
@@ -588,7 +929,7 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 
 async function emitToolCallOutcome(
 	toolCall: AgentToolCall,
-	result: AgentToolResult<any>,
+	result: AgentToolResult<unknown>,
 	isError: boolean,
 	emit: AgentEventSink,
 ): Promise<ToolResultMessage> {

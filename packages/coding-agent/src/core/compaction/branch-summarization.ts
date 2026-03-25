@@ -5,9 +5,8 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, AgentRuntime } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
-import { completeSimple } from "@mariozechner/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -16,6 +15,7 @@ import {
 } from "../messages.js";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
 import { estimateTokens } from "./compaction.js";
+import { executeSummary } from "./summary-runtime.js";
 import {
 	computeFileLists,
 	createFileOps,
@@ -75,6 +75,8 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Active runtime to execute the summary with */
+	runtime?: AgentRuntime;
 }
 
 // ============================================================================
@@ -282,7 +284,7 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
+	const { model, apiKey, signal, customInstructions, replaceInstructions, reserveTokens = 16384, runtime } = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -319,24 +321,24 @@ export async function generateBranchSummary(
 	];
 
 	// Call LLM for summarization
-	const response = await completeSimple(
+	const response = await executeSummary({
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, signal, maxTokens: 2048 },
-	);
+		systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+		messages: summarizationMessages,
+		apiKey,
+		signal,
+		maxTokens: 2048,
+		runtime,
+	});
 
-	// Check if aborted or errored
-	if (response.stopReason === "aborted") {
+	if (response.status === "aborted") {
 		return { aborted: true };
 	}
-	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+	if (response.status === "error") {
+		return { error: response.error };
 	}
 
-	let summary = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	let summary = response.text;
 
 	// Prepend preamble to provide context about the branch summary
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;

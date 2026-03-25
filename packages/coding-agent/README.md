@@ -86,6 +86,8 @@ Then just talk to pi. By default, pi gives the model four tools: `read`, `write`
 
 For each built-in provider, pi maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
 
+Architecture note: `@mariozechner/pi-agent-core` cleanly supports injected runtimes and `ModelHandle`-based execution. `pi-coding-agent` is using the new handle/runtime abstractions in several core paths, especially model selection and persistence, but the migration is still in progress. Current session construction does not yet inject a configured runtime by default, and built-in model catalogs, provider auth, `models.json` compatibility flags, and other migration paths still come from `@mariozechner/pi-ai`. Do not assume `pi-ai` is fully removed yet.
+
 **Subscriptions:**
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
@@ -116,6 +118,8 @@ For each built-in provider, pi maintains a list of tool-capable models, updated 
 See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 
 **Custom providers & models:** Add providers via `~/.pi/agent/models.json` if they speak a supported API (OpenAI, Anthropic, Google). For custom APIs or OAuth, use extensions. See [docs/models.md](docs/models.md) and [docs/custom-provider.md](docs/custom-provider.md).
+
+Compatibility note: persisted sessions and settings prefer opaque `modelHandleId` values. Provider/model pairs are still accepted and resolved as a fallback for older session data, older settings, and ad hoc custom-model compatibility.
 
 ---
 
@@ -241,6 +245,8 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
 Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+
+Runtime note: branch and compaction summarization already accept the newer runtime abstraction, but they still fall back to `createPiAiCompatRuntime()` when no configured runtime is available.
 
 ---
 
@@ -402,6 +408,8 @@ await session.prompt("What files are in the current directory?");
 ```
 
 See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
+
+The SDK still accepts `pi-ai` model objects in some entry points for compatibility, and runtime-facing state is normalized to coding-agent model handles internally. If you persist or compare models, treat the handle identity as opaque. The broader runtime-boundary migration is still in progress, so not every execution path is runtime-injected yet.
 
 ### RPC Mode
 
@@ -591,6 +599,7 @@ MIT
 
 ## See Also
 
-- [@mariozechner/pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai): Core LLM toolkit
-- [@mariozechner/pi-agent](https://www.npmjs.com/package/@mariozechner/pi-agent): Agent framework
+- [@mariozechner/pi-llm-runtime](https://www.npmjs.com/package/@mariozechner/pi-llm-runtime): Runtime boundary and `ModelHandle` types
+- [@mariozechner/pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai): Provider catalogs and compatibility helpers still used during migration
+- [@mariozechner/pi-agent-core](https://www.npmjs.com/package/@mariozechner/pi-agent-core): Agent runtime
 - [@mariozechner/pi-tui](https://www.npmjs.com/package/@mariozechner/pi-tui): Terminal UI components

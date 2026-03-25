@@ -7,6 +7,7 @@ import { bashTool, createBashTool, createLocalBashOperations } from "../src/core
 import { editTool } from "../src/core/tools/edit.js";
 import { findTool } from "../src/core/tools/find.js";
 import { grepTool } from "../src/core/tools/grep.js";
+import type { EditToolDetails, ReadToolDetails } from "../src/core/tools/index.js";
 import { lsTool } from "../src/core/tools/ls.js";
 import { readTool } from "../src/core/tools/read.js";
 import { writeTool } from "../src/core/tools/write.js";
@@ -147,13 +148,14 @@ describe("Coding Agent Tools", () => {
 			writeFileSync(testFile, lines.join("\n"));
 
 			const result = await readTool.execute("test-call-9", { path: testFile });
+			const details = result.details as ReadToolDetails | undefined;
 
-			expect(result.details).toBeDefined();
-			expect(result.details?.truncation).toBeDefined();
-			expect(result.details?.truncation?.truncated).toBe(true);
-			expect(result.details?.truncation?.truncatedBy).toBe("lines");
-			expect(result.details?.truncation?.totalLines).toBe(2500);
-			expect(result.details?.truncation?.outputLines).toBe(2000);
+			expect(details).toBeDefined();
+			expect(details?.truncation).toBeDefined();
+			expect(details?.truncation?.truncated).toBe(true);
+			expect(details?.truncation?.truncatedBy).toBe("lines");
+			expect(details?.truncation?.totalLines).toBe(2500);
+			expect(details?.truncation?.outputLines).toBe(2000);
 		});
 
 		it("should detect image MIME type from file magic (not extension)", async () => {
@@ -223,12 +225,13 @@ describe("Coding Agent Tools", () => {
 				oldText: "world",
 				newText: "testing",
 			});
+			const details = result.details as EditToolDetails | undefined;
 
 			expect(getTextOutput(result)).toContain("Successfully replaced");
-			expect(result.details).toBeDefined();
-			expect(result.details.diff).toBeDefined();
-			expect(typeof result.details.diff).toBe("string");
-			expect(result.details.diff).toContain("testing");
+			expect(details).toBeDefined();
+			expect(details?.diff).toBeDefined();
+			expect(typeof details?.diff).toBe("string");
+			expect(details?.diff).toContain("testing");
 		});
 
 		it("should fail if text not found", async () => {

@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Context, Model, OpenAICompletionsCompat } from "@mariozechner/pi-ai";
-import { getApiProvider } from "@mariozechner/pi-ai";
-import { getOAuthProvider } from "@mariozechner/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { getApiProvider, registerApiProvider } from "../../ai/src/api-registry.js";
+import { resetApiProviders } from "../../ai/src/providers/register-builtins.js";
+import { getOAuthProvider, registerOAuthProvider, unregisterOAuthProvider } from "../../ai/src/utils/oauth/index.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { clearApiKeyCache, ModelRegistry } from "../src/core/model-registry.js";
 
@@ -25,6 +26,7 @@ describe("ModelRegistry", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		clearApiKeyCache();
+		resetApiProviders();
 	});
 
 	/** Create minimal provider config  */
@@ -466,6 +468,70 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some((m) => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some((m) => m.id.includes("claude"))).toBe(true);
 		});
+
+		test("custom handle ids are opaque and resolve through the registry index", () => {
+			writeModelsJson({
+				anthropic: providerConfig("https://my-proxy.example.com/v1", [{ id: "claude-custom" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const customModel = registry.find("anthropic", "claude-custom");
+
+			expect(customModel).toBeDefined();
+			expect(customModel?.modelHandleId.startsWith("pi-model:")).toBe(true);
+			expect(customModel?.modelHandleId).not.toContain("anthropic");
+			expect(customModel?.modelHandleId).not.toContain("claude-custom");
+			expect(registry.findByPersistentModelHandleId(customModel!.modelHandleId)).toEqual(customModel);
+		});
+
+		test("legacy handle ids still resolve for backward compatibility", () => {
+			writeModelsJson({
+				anthropic: providerConfig("https://my-proxy.example.com/v1", [{ id: "claude-custom" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const customModel = registry.findByPersistentModelHandleId("handle://anthropic:claude-custom");
+
+			expect(customModel?.provider).toBe("anthropic");
+			expect(customModel?.id).toBe("claude-custom");
+		});
+
+		test("ad hoc custom models rebuild derived handle metadata", () => {
+			writeModelsJson({
+				openrouter: providerConfig("https://my-proxy.example.com/v1", [{ id: "base-model" }], "openai-completions"),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const adHocModel = registry.createAdHocModel("openrouter", "openai/ghost-model");
+
+			expect(adHocModel?.id).toBe("openai/ghost-model");
+			expect(adHocModel?.displayName).toBe("openai/ghost-model");
+			expect(adHocModel?.raw.id).toBe("openai/ghost-model");
+			expect(adHocModel?.raw.name).toBe("openai/ghost-model");
+			expect(adHocModel?.modelHandleId).toBeTruthy();
+			expect(adHocModel?.modelHandleId).not.toBe(registry.find("openrouter", "base-model")?.modelHandleId);
+		});
+
+		test("resolveStoredModel reconstructs persisted ad hoc custom models", () => {
+			writeModelsJson({
+				openrouter: providerConfig("https://my-proxy.example.com/v1", [{ id: "base-model" }], "openai-completions"),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const adHocModel = registry.createAdHocModel("openrouter", "openai/ghost-model");
+
+			expect(adHocModel).toBeDefined();
+
+			const restoredModel = registry.resolveStoredModel({
+				modelHandleId: adHocModel!.modelHandleId,
+				authProvider: adHocModel!.authProvider,
+				provider: adHocModel!.provider,
+				modelId: adHocModel!.id,
+			});
+
+			expect(restoredModel).toEqual(adHocModel);
+			expect(registry.findByPersistentModelHandleId(adHocModel!.modelHandleId)).toEqual(adHocModel);
+		});
 	});
 
 	describe("modelOverrides (per-model customization)", () => {
@@ -809,14 +875,244 @@ describe("ModelRegistry", () => {
 
 			registry.unregisterProvider("stream-override-provider");
 
-			let threwCustomOverrideAfterUnregister = false;
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).not.toThrow();
+		});
+
+		test("unregisterProvider restores the previously active API handler when overriding an already-overridden API", () => {
+			registerApiProvider(
+				{
+					api: "openai-completions",
+					stream: () => {
+						throw new Error("previous stream override");
+					},
+					streamSimple: () => {
+						throw new Error("previous stream override");
+					},
+				},
+				"external-test",
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("stream-override-provider", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("custom streamSimple override");
+				},
+			});
+
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"custom streamSimple override",
+			);
+
+			registry.unregisterProvider("stream-override-provider");
+
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).toThrow("previous stream override");
+		});
+
+		test("stacked registry-owned overrides on the same API unwind back to built-in handlers", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			registry.registerProvider("stream-override-a", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-a");
+				},
+			});
+			registry.registerProvider("stream-override-b", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-b");
+				},
+			});
+
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"override-b",
+			);
+
+			registry.unregisterProvider("stream-override-b");
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"override-a",
+			);
+
+			registry.unregisterProvider("stream-override-a");
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).not.toThrow();
+		});
+
+		test("stacked registry-owned overrides on the same API unwind back to prior external handlers", () => {
+			registerApiProvider(
+				{
+					api: "openai-completions",
+					stream: () => {
+						throw new Error("external stream override");
+					},
+					streamSimple: () => {
+						throw new Error("external stream override");
+					},
+				},
+				"external-test",
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("stream-override-a", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-a");
+				},
+			});
+			registry.registerProvider("stream-override-b", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-b");
+				},
+			});
+
+			registry.unregisterProvider("stream-override-b");
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"override-a",
+			);
+
+			registry.unregisterProvider("stream-override-a");
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).toThrow("external stream override");
+		});
+
+		test("out-of-order removal updates later overrides to unwind back to built-in handlers", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			registry.registerProvider("stream-override-a", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-a");
+				},
+			});
+			registry.registerProvider("stream-override-b", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-b");
+				},
+			});
+
+			registry.unregisterProvider("stream-override-a");
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"override-b",
+			);
+
+			registry.unregisterProvider("stream-override-b");
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).not.toThrow();
+		});
+
+		test("out-of-order removal updates later overrides to unwind back to prior external handlers", () => {
+			registerApiProvider(
+				{
+					api: "openai-completions",
+					stream: () => {
+						throw new Error("external stream override");
+					},
+					streamSimple: () => {
+						throw new Error("external stream override");
+					},
+				},
+				"external-test",
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("stream-override-a", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-a");
+				},
+			});
+			registry.registerProvider("stream-override-b", {
+				api: "openai-completions",
+				streamSimple: () => {
+					throw new Error("override-b");
+				},
+			});
+
+			registry.unregisterProvider("stream-override-a");
+			expect(() => getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext)).toThrow(
+				"override-b",
+			);
+
+			registry.unregisterProvider("stream-override-b");
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).toThrow("external stream override");
+		});
+
+		test("refresh preserves unrelated external API provider overrides", () => {
+			registerApiProvider(
+				{
+					api: "openai-completions",
+					stream: () => {
+						throw new Error("external stream override");
+					},
+					streamSimple: () => {
+						throw new Error("external stream override");
+					},
+				},
+				"external-test",
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("demo-provider", {
+				api: "anthropic-messages",
+				streamSimple: () => {
+					throw new Error("demo override");
+				},
+			});
+
+			registry.refresh();
+
+			const restoredProvider = getApiProvider("openai-completions");
+			expect(restoredProvider).toBeDefined();
+			expect(() => restoredProvider!.streamSimple(openAiModel, emptyContext)).toThrow("external stream override");
+		});
+
+		test("refresh preserves unrelated external OAuth providers", () => {
+			const providerId = `external-oauth-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			registerOAuthProvider({
+				id: providerId,
+				name: "External OAuth Provider",
+				login: async () => ({
+					access: "external-access-token",
+					refresh: "external-refresh-token",
+					expires: Date.now() + 60_000,
+				}),
+				refreshToken: async (credentials) => credentials,
+				getApiKey: (credentials) => credentials.access,
+			});
+
 			try {
-				getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext);
-			} catch (error) {
-				threwCustomOverrideAfterUnregister =
-					error instanceof Error && error.message === "custom streamSimple override";
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				registry.registerProvider("anthropic", {
+					oauth: {
+						name: "Custom Anthropic OAuth",
+						login: async () => ({
+							access: "custom-access-token",
+							refresh: "custom-refresh-token",
+							expires: Date.now() + 60_000,
+						}),
+						refreshToken: async (credentials) => credentials,
+						getApiKey: (credentials) => credentials.access,
+					},
+				});
+
+				registry.refresh();
+
+				expect(getOAuthProvider(providerId)?.name).toBe("External OAuth Provider");
+			} finally {
+				unregisterOAuthProvider(providerId);
 			}
-			expect(threwCustomOverrideAfterUnregister).toBe(false);
 		});
 	});
 

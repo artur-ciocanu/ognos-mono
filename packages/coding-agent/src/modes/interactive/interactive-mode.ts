@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, OAuthProviderId } from "@mariozechner/pi-ai";
 import type {
 	AutocompleteItem,
 	EditorComponent,
@@ -58,6 +58,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import { createCompactionSummaryMessage } from "../../core/messages.js";
+import type { CodingAgentModelHandle } from "../../core/model-handle.js";
 import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
 import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
@@ -2359,8 +2360,26 @@ export class InteractiveMode {
 
 			case "tool_execution_update": {
 				const component = this.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.partialResult, isError: false }, true);
+				if (
+					component &&
+					typeof event.partialResult === "object" &&
+					event.partialResult !== null &&
+					"content" in event.partialResult &&
+					Array.isArray(event.partialResult.content)
+				) {
+					component.updateResult(
+						{
+							...event.partialResult,
+							content: event.partialResult.content as Array<{
+								type: string;
+								text?: string;
+								data?: string;
+								mimeType?: string;
+							}>,
+							isError: false,
+						},
+						true,
+					);
 					this.ui.requestRender();
 				}
 				break;
@@ -2368,8 +2387,23 @@ export class InteractiveMode {
 
 			case "tool_execution_end": {
 				const component = this.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
+				if (
+					component &&
+					typeof event.result === "object" &&
+					event.result !== null &&
+					"content" in event.result &&
+					Array.isArray(event.result.content)
+				) {
+					component.updateResult({
+						...event.result,
+						content: event.result.content as Array<{
+							type: string;
+							text?: string;
+							data?: string;
+							mimeType?: string;
+						}>,
+						isError: event.isError,
+					});
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3388,12 +3422,12 @@ export class InteractiveMode {
 		this.showModelSelector(searchTerm);
 	}
 
-	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
+	private async findExactModelMatch(searchTerm: string): Promise<CodingAgentModelHandle | undefined> {
 		const models = await this.getModelCandidates();
 		return findExactModelReferenceMatch(searchTerm, models);
 	}
 
-	private async getModelCandidates(): Promise<Model<any>[]> {
+	private async getModelCandidates(): Promise<CodingAgentModelHandle[]> {
 		if (this.session.scopedModels.length > 0) {
 			return this.session.scopedModels.map((scoped) => scoped.model);
 		}

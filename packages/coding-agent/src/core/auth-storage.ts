@@ -37,6 +37,23 @@ type LockResult<T> = {
 	next?: string;
 };
 
+export interface AuthRuntime {
+	getEnvApiKey(provider: string): string | undefined;
+	getOAuthApiKey(
+		providerId: OAuthProviderId,
+		credentials: Record<string, OAuthCredentials>,
+	): Promise<{ newCredentials: OAuthCredentials; apiKey: string } | null>;
+	getOAuthProvider(providerId: OAuthProviderId): ReturnType<typeof getOAuthProvider>;
+	getOAuthProviders(): ReturnType<typeof getOAuthProviders>;
+}
+
+const defaultAuthRuntime: AuthRuntime = {
+	getEnvApiKey,
+	getOAuthApiKey,
+	getOAuthProvider,
+	getOAuthProviders,
+};
+
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
@@ -188,22 +205,25 @@ export class AuthStorage {
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
 
-	private constructor(private storage: AuthStorageBackend) {
+	private constructor(
+		private storage: AuthStorageBackend,
+		private runtime: AuthRuntime = defaultAuthRuntime,
+	) {
 		this.reload();
 	}
 
-	static create(authPath?: string): AuthStorage {
-		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")));
+	static create(authPath?: string, runtime?: AuthRuntime): AuthStorage {
+		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")), runtime);
 	}
 
-	static fromStorage(storage: AuthStorageBackend): AuthStorage {
-		return new AuthStorage(storage);
+	static fromStorage(storage: AuthStorageBackend, runtime?: AuthRuntime): AuthStorage {
+		return new AuthStorage(storage, runtime);
 	}
 
-	static inMemory(data: AuthStorageData = {}): AuthStorage {
+	static inMemory(data: AuthStorageData = {}, runtime?: AuthRuntime): AuthStorage {
 		const storage = new InMemoryAuthStorageBackend();
 		storage.withLock(() => ({ result: undefined, next: JSON.stringify(data, null, 2) }));
-		return AuthStorage.fromStorage(storage);
+		return AuthStorage.fromStorage(storage, runtime);
 	}
 
 	/**
@@ -324,7 +344,7 @@ export class AuthStorage {
 	hasAuth(provider: string): boolean {
 		if (this.runtimeOverrides.has(provider)) return true;
 		if (this.data[provider]) return true;
-		if (getEnvApiKey(provider)) return true;
+		if (this.runtime.getEnvApiKey(provider)) return true;
 		if (this.fallbackResolver?.(provider)) return true;
 		return false;
 	}
@@ -346,7 +366,7 @@ export class AuthStorage {
 	 * Login to an OAuth provider.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
-		const provider = getOAuthProvider(providerId);
+		const provider = this.runtime.getOAuthProvider(providerId);
 		if (!provider) {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
 		}
@@ -369,7 +389,7 @@ export class AuthStorage {
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
-		const provider = getOAuthProvider(providerId);
+		const provider = this.runtime.getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
 		}
@@ -395,7 +415,7 @@ export class AuthStorage {
 				}
 			}
 
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
+			const refreshed = await this.runtime.getOAuthApiKey(providerId, oauthCreds);
 			if (!refreshed) {
 				return { result: null };
 			}
@@ -435,7 +455,7 @@ export class AuthStorage {
 		}
 
 		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
+			const provider = this.runtime.getOAuthProvider(providerId as OAuthProviderId);
 			if (!provider) {
 				// Unknown OAuth provider, can't get API key
 				return undefined;
@@ -473,7 +493,7 @@ export class AuthStorage {
 		}
 
 		// Fall back to environment variable
-		const envKey = getEnvApiKey(providerId);
+		const envKey = this.runtime.getEnvApiKey(providerId);
 		if (envKey) return envKey;
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
@@ -484,6 +504,6 @@ export class AuthStorage {
 	 * Get all registered OAuth providers
 	 */
 	getOAuthProviders() {
-		return getOAuthProviders();
+		return this.runtime.getOAuthProviders();
 	}
 }

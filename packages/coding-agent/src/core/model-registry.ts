@@ -6,6 +6,7 @@ import {
 	type Api,
 	type AssistantMessageEventStream,
 	type Context,
+	getApiProvider,
 	getModels,
 	getProviders,
 	type KnownProvider,
@@ -14,16 +15,24 @@ import {
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
 	registerApiProvider,
-	resetApiProviders,
 	type SimpleStreamOptions,
+	unregisterApiProviders,
 } from "@mariozechner/pi-ai";
-import { registerOAuthProvider, resetOAuthProviders } from "@mariozechner/pi-ai/oauth";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@mariozechner/pi-ai/oauth";
 import { type Static, Type } from "@sinclair/typebox";
 import AjvModule from "ajv";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getAgentDir } from "../config.js";
 import type { AuthStorage } from "./auth-storage.js";
+import {
+	type CodingAgentModelHandle,
+	cloneCodingAgentModelHandle,
+	getAuthProvider,
+	type PersistedModelReference,
+	parseLegacyPersistentModelHandleId,
+	toCodingAgentModelHandle,
+} from "./model-handle.js";
 import { clearConfigValueCache, resolveConfigValue, resolveHeaders } from "./resolve-config-value.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -165,6 +174,17 @@ function emptyCustomModelsResult(error?: string): CustomModelsResult {
 	return { models: [], overrides: new Map(), modelOverrides: new Map(), error };
 }
 
+interface RegisteredApiOverride {
+	api: Api;
+	providerDefinition: {
+		api: Api;
+		stream: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+		streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+	};
+	previousProvider: ReturnType<typeof getApiProvider>;
+	registeredProvider: ReturnType<typeof getApiProvider>;
+}
+
 function mergeCompat(
 	baseCompat: Model<Api>["compat"],
 	overrideCompat: ModelOverride["compat"],
@@ -240,8 +260,12 @@ export const clearApiKeyCache = clearConfigValueCache;
  */
 export class ModelRegistry {
 	private models: Model<Api>[] = [];
+	private handlesById: Map<string, CodingAgentModelHandle> = new Map();
 	private customProviderApiKeys: Map<string, string> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
+	private registeredApiOverrides: Map<string, RegisteredApiOverride> = new Map();
+	private registeredApiOverrideOrder: Map<Api, string[]> = new Map();
+	private registeredOAuthProviderNames: Set<string> = new Set();
 	private loadError: string | undefined = undefined;
 
 	constructor(
@@ -268,9 +292,7 @@ export class ModelRegistry {
 		this.customProviderApiKeys.clear();
 		this.loadError = undefined;
 
-		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
-		resetApiProviders();
-		resetOAuthProviders();
+		this.clearDynamicProviderRegistrations();
 
 		this.loadModels();
 
@@ -312,6 +334,15 @@ export class ModelRegistry {
 		}
 
 		this.models = combined;
+		this.rebuildHandleIndex();
+	}
+
+	private rebuildHandleIndex(): void {
+		this.handlesById.clear();
+		for (const model of this.models) {
+			const handle = toCodingAgentModelHandle(model);
+			this.handlesById.set(handle.modelHandleId, handle);
+		}
 	}
 
 	/** Load built-in models and apply provider/model overrides */
@@ -520,30 +551,89 @@ export class ModelRegistry {
 	 * Get all models (built-in + custom).
 	 * If models.json had errors, returns only built-in models.
 	 */
-	getAll(): Model<Api>[] {
-		return this.models;
+	getAll(): CodingAgentModelHandle[] {
+		return this.models.map((model) => toCodingAgentModelHandle(model));
 	}
 
 	/**
 	 * Get only models that have auth configured.
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
-	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => this.authStorage.hasAuth(m.provider));
+	getAvailable(): CodingAgentModelHandle[] {
+		return this.models
+			.filter((model) => this.authStorage.hasAuth(model.provider))
+			.map((model) => toCodingAgentModelHandle(model));
 	}
 
 	/**
 	 * Find a model by provider and ID.
 	 */
-	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.models.find((m) => m.provider === provider && m.id === modelId);
+	find(provider: string, modelId: string): CodingAgentModelHandle | undefined {
+		const model = this.models.find((entry) => entry.provider === provider && entry.id === modelId);
+		return model ? toCodingAgentModelHandle(model) : undefined;
+	}
+
+	findByPersistentModelHandleId(modelHandleId: string): CodingAgentModelHandle | undefined {
+		const exact = this.handlesById.get(modelHandleId);
+		if (exact) {
+			return exact;
+		}
+
+		const legacy = parseLegacyPersistentModelHandleId(modelHandleId);
+		if (!legacy?.authProvider) {
+			return undefined;
+		}
+		return this.find(legacy.authProvider, legacy.modelId);
+	}
+
+	resolveStoredModel(reference: PersistedModelReference): CodingAgentModelHandle | undefined {
+		if (reference.modelHandleId) {
+			const exact = this.findByPersistentModelHandleId(reference.modelHandleId);
+			if (exact) {
+				return exact;
+			}
+		}
+
+		const authProvider = getAuthProvider(reference);
+		if (authProvider) {
+			const exact = this.find(authProvider, reference.modelId);
+			if (exact) {
+				return exact;
+			}
+
+			const adHoc = this.createAdHocModel(reference.provider ?? authProvider, reference.modelId, authProvider);
+			if (!reference.modelHandleId || adHoc?.modelHandleId === reference.modelHandleId) {
+				return adHoc;
+			}
+		}
+
+		const matches = this.getAll().filter((model) => model.id === reference.modelId);
+		return matches.length === 1 ? matches[0] : undefined;
+	}
+
+	createAdHocModel(provider: string, modelId: string, authProvider = provider): CodingAgentModelHandle | undefined {
+		const baseModel = this.getAll().find((model) => model.provider === provider);
+		if (!baseModel) {
+			return undefined;
+		}
+
+		const adHocModel = cloneCodingAgentModelHandle(
+			authProvider === baseModel.authProvider ? baseModel : { ...baseModel, authProvider },
+			{
+				id: modelId,
+				name: modelId,
+			},
+		);
+		this.handlesById.set(adHocModel.modelHandleId, adHocModel);
+		return adHocModel;
 	}
 
 	/**
 	 * Get API key for a model.
 	 */
-	async getApiKey(model: Model<Api>): Promise<string | undefined> {
-		return this.authStorage.getApiKey(model.provider);
+	async getApiKey(model: Pick<CodingAgentModelHandle, "authProvider" | "provider">): Promise<string | undefined> {
+		const authProvider = getAuthProvider(model);
+		return authProvider ? this.authStorage.getApiKey(authProvider) : undefined;
 	}
 
 	/**
@@ -556,8 +646,12 @@ export class ModelRegistry {
 	/**
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
-	isUsingOAuth(model: Model<Api>): boolean {
-		const cred = this.authStorage.get(model.provider);
+	isUsingOAuth(model: Pick<CodingAgentModelHandle, "authProvider" | "provider">): boolean {
+		const authProvider = getAuthProvider(model);
+		if (!authProvider) {
+			return false;
+		}
+		const cred = this.authStorage.get(authProvider);
 		return cred?.type === "oauth";
 	}
 
@@ -570,6 +664,7 @@ export class ModelRegistry {
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput): void {
 		this.validateProviderConfig(providerName, config);
+		this.unregisterDynamicProviderRegistration(providerName);
 		this.applyProviderConfig(providerName, config);
 		this.registeredProviders.set(providerName, config);
 	}
@@ -587,7 +682,68 @@ export class ModelRegistry {
 		if (!this.registeredProviders.has(providerName)) return;
 		this.registeredProviders.delete(providerName);
 		this.customProviderApiKeys.delete(providerName);
+		this.unregisterDynamicProviderRegistration(providerName);
 		this.refresh();
+	}
+
+	private unregisterDynamicProviderRegistration(providerName: string): void {
+		const apiOverride = this.registeredApiOverrides.get(providerName);
+		if (apiOverride) {
+			this.registeredApiOverrides.delete(providerName);
+			const overrideOrder = this.registeredApiOverrideOrder.get(apiOverride.api) ?? [];
+			const overrideIndex = overrideOrder.indexOf(providerName);
+			const wasTopmost = overrideOrder[overrideOrder.length - 1] === providerName;
+			const nextOrder = overrideOrder.filter((name) => name !== providerName);
+			if (nextOrder.length > 0) {
+				this.registeredApiOverrideOrder.set(apiOverride.api, nextOrder);
+			} else {
+				this.registeredApiOverrideOrder.delete(apiOverride.api);
+			}
+
+			if (!wasTopmost && overrideIndex !== -1) {
+				const nextOverrideName = overrideOrder[overrideIndex + 1];
+				if (nextOverrideName) {
+					const nextOverride = this.registeredApiOverrides.get(nextOverrideName);
+					if (nextOverride) {
+						const previousOverrideName = overrideIndex > 0 ? overrideOrder[overrideIndex - 1] : undefined;
+						const previousOverride = previousOverrideName
+							? this.registeredApiOverrides.get(previousOverrideName)
+							: undefined;
+						nextOverride.previousProvider = previousOverride?.registeredProvider ?? apiOverride.previousProvider;
+					}
+				}
+			}
+
+			if (wasTopmost && getApiProvider(apiOverride.api) === apiOverride.registeredProvider) {
+				const previousOverrideName = nextOrder[nextOrder.length - 1];
+				if (previousOverrideName) {
+					const previousOverride = this.registeredApiOverrides.get(previousOverrideName);
+					if (previousOverride) {
+						registerApiProvider(previousOverride.providerDefinition, `provider:${previousOverrideName}`);
+						previousOverride.registeredProvider = getApiProvider(previousOverride.api);
+					}
+				} else if (apiOverride.previousProvider) {
+					registerApiProvider(apiOverride.previousProvider);
+				} else {
+					unregisterApiProviders(`provider:${providerName}`);
+				}
+			}
+		}
+
+		if (this.registeredOAuthProviderNames.delete(providerName)) {
+			unregisterOAuthProvider(providerName);
+		}
+	}
+
+	private clearDynamicProviderRegistrations(): void {
+		for (const providerName of [...this.registeredApiOverrides.keys()].reverse()) {
+			this.unregisterDynamicProviderRegistration(providerName);
+		}
+
+		for (const providerName of this.registeredOAuthProviderNames) {
+			unregisterOAuthProvider(providerName);
+		}
+		this.registeredOAuthProviderNames.clear();
 	}
 
 	private validateProviderConfig(providerName: string, config: ProviderConfigInput): void {
@@ -623,18 +779,29 @@ export class ModelRegistry {
 				id: providerName,
 			};
 			registerOAuthProvider(oauthProvider);
+			this.registeredOAuthProviderNames.add(providerName);
 		}
 
 		if (config.streamSimple) {
 			const streamSimple = config.streamSimple;
-			registerApiProvider(
-				{
-					api: config.api!,
-					stream: (model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
-					streamSimple,
-				},
-				`provider:${providerName}`,
-			);
+			const api = config.api!;
+			const previousProvider = getApiProvider(api);
+			const providerDefinition = {
+				api,
+				stream: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) =>
+					streamSimple(model, context, options as SimpleStreamOptions),
+				streamSimple,
+			};
+			registerApiProvider(providerDefinition, `provider:${providerName}`);
+			this.registeredApiOverrides.set(providerName, {
+				api,
+				providerDefinition,
+				previousProvider,
+				registeredProvider: getApiProvider(api),
+			});
+			const overrideOrder = this.registeredApiOverrideOrder.get(api) ?? [];
+			overrideOrder.push(providerName);
+			this.registeredApiOverrideOrder.set(api, overrideOrder);
 		}
 
 		// Store API key for auth resolution

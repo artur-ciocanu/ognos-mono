@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import { Agent, createPiAiCompatRuntime, type ThinkingLevel, toModelHandle } from "@mariozechner/pi-agent-core";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
@@ -68,11 +68,12 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 		const agent = new Agent({
 			getApiKey: () => apiKey,
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "You are a helpful assistant. Be concise.",
 				tools: codingTools,
 				thinkingLevel,
 			},
+			runtime: createPiAiCompatRuntime(),
 		});
 
 		const sessionManager = SessionManager.inMemory();
@@ -166,11 +167,12 @@ describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic
 		const agent = new Agent({
 			getApiKey: () => API_KEY,
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "You are a helpful assistant. Be concise.",
 				tools: codingTools,
 				thinkingLevel,
 			},
+			runtime: createPiAiCompatRuntime(),
 		});
 
 		const sessionManager = SessionManager.inMemory();

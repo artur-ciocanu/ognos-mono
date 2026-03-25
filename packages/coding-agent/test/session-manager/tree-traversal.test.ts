@@ -50,7 +50,7 @@ describe("SessionManager append and tree traversal", () => {
 			const session = SessionManager.inMemory();
 
 			const msgId = session.appendMessage(userMsg("hello"));
-			const modelId = session.appendModelChange("openai", "gpt-4");
+			const modelId = session.appendModelChange({ authProvider: "openai", provider: "openai", modelId: "gpt-4" });
 			const _msg2Id = session.appendMessage(assistantMsg("response"));
 
 			const entries = session.getEntries();

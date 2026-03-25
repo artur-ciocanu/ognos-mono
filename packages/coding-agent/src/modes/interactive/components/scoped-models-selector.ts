@@ -1,4 +1,3 @@
-import type { Model } from "@mariozechner/pi-ai";
 import {
 	Container,
 	type Focusable,
@@ -10,6 +9,7 @@ import {
 	Spacer,
 	Text,
 } from "@mariozechner/pi-tui";
+import type { CodingAgentModelHandle } from "../../../core/model-handle.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
@@ -64,12 +64,12 @@ function getSortedIds(enabledIds: EnabledIds, allIds: string[]): string[] {
 
 interface ModelItem {
 	fullId: string;
-	model: Model<any>;
+	model: CodingAgentModelHandle;
 	enabled: boolean;
 }
 
 export interface ModelsConfig {
-	allModels: Model<any>[];
+	allModels: CodingAgentModelHandle[];
 	enabledModelIds: Set<string>;
 	/** true if enabledModels setting is defined (empty = all enabled) */
 	hasEnabledModelsFilter: boolean;
@@ -94,7 +94,7 @@ export interface ModelsCallbacks {
  * Changes are session-only until explicitly persisted with Ctrl+S.
  */
 export class ScopedModelsSelectorComponent extends Container implements Focusable {
-	private modelsById: Map<string, Model<any>> = new Map();
+	private modelsById: Map<string, CodingAgentModelHandle> = new Map();
 	private allIds: string[] = [];
 	private enabledIds: EnabledIds = null;
 	private filteredItems: ModelItem[] = [];

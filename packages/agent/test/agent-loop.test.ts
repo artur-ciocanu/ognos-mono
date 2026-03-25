@@ -1,29 +1,19 @@
-import {
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
-	type Message,
-	type Model,
-	type UserMessage,
-} from "@mariozechner/pi-ai";
+import type { AssistantMessage, Message, UserMessage } from "@mariozechner/pi-ai";
+import type { ModelHandle, RuntimeUsage } from "@mariozechner/pi-llm-runtime";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentRuntime,
+	AgentRuntimeEvent,
+	AgentTool,
+} from "../src/types.js";
 
-// Mock stream for testing - mimics MockAssistantStream
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
+type RuntimeDoneReason = NonNullable<Extract<AgentRuntimeEvent, { type: "done" }>["reason"]>;
 
 function createUsage() {
 	return {
@@ -36,18 +26,19 @@ function createUsage() {
 	};
 }
 
-function createModel(): Model<"openai-responses"> {
+function createModel(): ModelHandle {
 	return {
 		id: "mock",
-		name: "mock",
-		api: "openai-responses",
-		provider: "openai",
-		baseUrl: "https://example.invalid",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 8192,
-		maxTokens: 2048,
+		displayName: "mock",
+		capabilities: {
+			tools: true,
+			images: true,
+			streaming: true,
+		},
+		raw: {
+			api: "openai-responses",
+			provider: "openai",
+		},
 	};
 }
 
@@ -67,6 +58,14 @@ function createAssistantMessage(
 	};
 }
 
+function createRuntimeUsage(): RuntimeUsage {
+	return {
+		inputTokens: 0,
+		outputTokens: 0,
+		cachedInputTokens: 0,
+	};
+}
+
 function createUserMessage(text: string): UserMessage {
 	return {
 		role: "user",
@@ -75,9 +74,84 @@ function createUserMessage(text: string): UserMessage {
 	};
 }
 
+function hasRole(value: AgentMessage, role: string): value is AgentMessage & { role: string } {
+	return "role" in value && value.role === role;
+}
+
 // Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+}
+
+function createRuntime(eventsFactory: () => AgentRuntimeEvent[]): AgentRuntime {
+	return {
+		async *stream() {
+			for (const event of eventsFactory()) {
+				yield event;
+			}
+		},
+	};
+}
+
+function createRuntimeFromMessages(messages: AssistantMessage[]): AgentRuntime {
+	let callIndex = 0;
+
+	return createRuntime(() => {
+		const message = messages[Math.min(callIndex, messages.length - 1)];
+		callIndex++;
+
+		const events: AgentRuntimeEvent[] = [{ type: "start" }];
+		let textIndex = 0;
+		let thinkingIndex = 0;
+		for (const content of message.content) {
+			switch (content.type) {
+				case "text":
+					events.push({ type: "text_start", id: `text-${textIndex}` });
+					if (content.text.length > 0) {
+						events.push({ type: "text_delta", id: `text-${textIndex}`, delta: content.text });
+					}
+					events.push({ type: "text_end", id: `text-${textIndex}` });
+					textIndex++;
+					break;
+				case "thinking":
+					events.push({ type: "thinking_start", id: `thinking-${thinkingIndex}` });
+					if (content.thinking.length > 0) {
+						events.push({
+							type: "thinking_delta",
+							id: `thinking-${thinkingIndex}`,
+							delta: content.thinking,
+						});
+					}
+					events.push({ type: "thinking_end", id: `thinking-${thinkingIndex}` });
+					thinkingIndex++;
+					break;
+				case "toolCall": {
+					const serializedArguments = JSON.stringify(content.arguments);
+					events.push({ type: "toolcall_start", id: content.id, toolName: content.name });
+					if (serializedArguments.length > 0) {
+						events.push({ type: "toolcall_delta", id: content.id, delta: serializedArguments });
+					}
+					events.push({ type: "toolcall_end", id: content.id });
+					break;
+				}
+			}
+		}
+
+		events.push({
+			type: "done",
+			usage: createRuntimeUsage(),
+			reason: normalizeRuntimeDoneReason(message.stopReason),
+		});
+		return events;
+	});
+}
+
+function normalizeRuntimeDoneReason(stopReason: AssistantMessage["stopReason"]): RuntimeDoneReason {
+	if (stopReason === "error" || stopReason === "aborted") {
+		return "stop";
+	}
+
+	return stopReason;
 }
 
 describe("agentLoop with AgentMessage", () => {
@@ -93,19 +167,17 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-		};
-
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage([{ type: "text", text: "Hi there!" }]);
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
+			runtime: createRuntime(() => [
+				{ type: "start" },
+				{ type: "text_start", id: "text-0" },
+				{ type: "text_delta", id: "text-0", delta: "Hi there!" },
+				{ type: "text_end", id: "text-0" },
+				{ type: "done", usage: createRuntimeUsage(), reason: "stop" },
+			]),
 		};
 
 		const events: AgentEvent[] = [];
-		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		const stream = agentLoop([userPrompt], context, config);
 
 		for await (const event of stream) {
 			events.push(event);
@@ -160,19 +232,11 @@ describe("agentLoop with AgentMessage", () => {
 					.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 				return convertedMessages;
 			},
-		};
-
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
+			runtime: createRuntimeFromMessages([createAssistantMessage([{ type: "text", text: "Response" }])]),
 		};
 
 		const events: AgentEvent[] = [];
-		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		const stream = agentLoop([userPrompt], context, config);
 
 		for await (const event of stream) {
 			events.push(event);
@@ -213,18 +277,10 @@ describe("agentLoop with AgentMessage", () => {
 				) as Message[];
 				return convertedMessages;
 			},
+			runtime: createRuntimeFromMessages([createAssistantMessage([{ type: "text", text: "Response" }])]),
 		};
 
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		};
-
-		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		const stream = agentLoop([userPrompt], context, config);
 
 		for await (const _ of stream) {
 			// consume
@@ -234,6 +290,36 @@ describe("agentLoop with AgentMessage", () => {
 		expect(transformedMessages.length).toBe(2);
 		// Then convertToLlm receives the pruned messages
 		expect(convertedMessages.length).toBe(2);
+	});
+
+	it("should prepend the system prompt to runtime messages", async () => {
+		const runtimeMessages: Array<{ role: string; content: string }> = [];
+		const context: AgentContext = {
+			systemPrompt: "System contract prompt",
+			messages: [],
+			tools: [],
+		};
+
+		const stream = agentLoop([createUserMessage("Hello")], context, {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			runtime: {
+				async *stream(_model, runtimeContext) {
+					for (const message of runtimeContext.messages) {
+						runtimeMessages.push({ role: message.role, content: message.content });
+					}
+					yield { type: "start" };
+					yield { type: "done", usage: createRuntimeUsage(), reason: "stop" };
+				},
+			},
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(runtimeMessages[0]).toEqual({ role: "system", content: "System contract prompt" });
+		expect(runtimeMessages[1]).toEqual({ role: "user", content: "Hello" });
 	});
 
 	it("should handle tool calls and results", async () => {
@@ -264,31 +350,17 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-		};
-
-		let callIndex = 0;
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				if (callIndex === 0) {
-					// First call: return tool call
-					const message = createAssistantMessage(
-						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
-						"toolUse",
-					);
-					stream.push({ type: "done", reason: "toolUse", message });
-				} else {
-					// Second call: return final response
-					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					stream.push({ type: "done", reason: "stop", message });
-				}
-				callIndex++;
-			});
-			return stream;
+			runtime: createRuntimeFromMessages([
+				createAssistantMessage(
+					[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+					"toolUse",
+				),
+				createAssistantMessage([{ type: "text", text: "done" }]),
+			]),
 		};
 
 		const events: AgentEvent[] = [];
-		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		const stream = agentLoop([userPrompt], context, config);
 
 		for await (const event of stream) {
 			events.push(event);
@@ -349,28 +421,18 @@ describe("agentLoop with AgentMessage", () => {
 			toolExecution: "parallel",
 		};
 
-		let callIndex = 0;
-		const stream = agentLoop([userPrompt], context, config, undefined, () => {
-			const mockStream = new MockAssistantStream();
-			queueMicrotask(() => {
-				if (callIndex === 0) {
-					const message = createAssistantMessage(
-						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
-						],
-						"toolUse",
-					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
-					setTimeout(() => releaseFirst?.(), 20);
-				} else {
-					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
-				}
-				callIndex++;
-			});
-			return mockStream;
-		});
+		const runtime = createRuntimeFromMessages([
+			createAssistantMessage(
+				[
+					{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+					{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+				],
+				"toolUse",
+			),
+			createAssistantMessage([{ type: "text", text: "done" }]),
+		]);
+		setTimeout(() => releaseFirst?.(), 20);
+		const stream = agentLoop([userPrompt], context, { ...config, runtime });
 
 		const events: AgentEvent[] = [];
 		for await (const event of stream) {
@@ -430,38 +492,40 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				return [];
 			},
+			runtime: {
+				async *stream(_model, ctx) {
+					const currentCallIndex = callIndex;
+					callIndex++;
+
+					// Check if interrupt message is in context on second call
+					if (currentCallIndex === 1) {
+						sawInterruptInContext = ctx.messages.some((message) => {
+							return message.role === "user" && message.content === "interrupt";
+						});
+					}
+
+					if (currentCallIndex === 0) {
+						yield* createRuntimeFromMessages([
+							createAssistantMessage(
+								[
+									{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+									{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+								],
+								"toolUse",
+							),
+						]).stream(createModel(), ctx);
+					} else {
+						yield* createRuntimeFromMessages([createAssistantMessage([{ type: "text", text: "done" }])]).stream(
+							createModel(),
+							ctx,
+						);
+					}
+				},
+			},
 		};
 
 		const events: AgentEvent[] = [];
-		const stream = agentLoop([userPrompt], context, config, undefined, (_model, ctx, _options) => {
-			// Check if interrupt message is in context on second call
-			if (callIndex === 1) {
-				sawInterruptInContext = ctx.messages.some(
-					(m) => m.role === "user" && typeof m.content === "string" && m.content === "interrupt",
-				);
-			}
-
-			const mockStream = new MockAssistantStream();
-			queueMicrotask(() => {
-				if (callIndex === 0) {
-					// First call: return two tool calls
-					const message = createAssistantMessage(
-						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
-						],
-						"toolUse",
-					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
-				} else {
-					// Second call: return final response
-					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
-				}
-				callIndex++;
-			});
-			return mockStream;
-		});
+		const stream = agentLoop([userPrompt], context, config);
 
 		for await (const event of stream) {
 			events.push(event);
@@ -523,19 +587,11 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-		};
-
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
+			runtime: createRuntimeFromMessages([createAssistantMessage([{ type: "text", text: "Response" }])]),
 		};
 
 		const events: AgentEvent[] = [];
-		const stream = agentLoopContinue(context, config, undefined, streamFn);
+		const stream = agentLoopContinue(context, config);
 
 		for await (const event of stream) {
 			events.push(event);
@@ -550,7 +606,9 @@ describe("agentLoopContinue with AgentMessage", () => {
 		// Should NOT have user message events (that's the key difference from agentLoop)
 		const messageEndEvents = events.filter((e) => e.type === "message_end");
 		expect(messageEndEvents.length).toBe(1);
-		expect((messageEndEvents[0] as any).message.role).toBe("assistant");
+		expect(messageEndEvents[0]?.type === "message_end" ? messageEndEvents[0].message.role : undefined).toBe(
+			"assistant",
+		);
 	});
 
 	it("should allow custom message types as last message (caller responsibility)", async () => {
@@ -566,6 +624,9 @@ describe("agentLoopContinue with AgentMessage", () => {
 			text: "Hook content",
 			timestamp: Date.now(),
 		};
+		const isCustomMessage = (value: AgentMessage): value is AgentMessage & CustomMessage => {
+			return hasRole(value, "custom") && "text" in value && "timestamp" in value;
+		};
 
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
@@ -579,10 +640,10 @@ describe("agentLoopContinue with AgentMessage", () => {
 				// Convert custom to user message
 				return messages
 					.map((m) => {
-						if ((m as any).role === "custom") {
+						if (isCustomMessage(m)) {
 							return {
 								role: "user" as const,
-								content: (m as any).text,
+								content: m.text,
 								timestamp: m.timestamp,
 							};
 						}
@@ -590,19 +651,13 @@ describe("agentLoopContinue with AgentMessage", () => {
 					})
 					.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 			},
-		};
-
-		const streamFn = () => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage([{ type: "text", text: "Response to custom message" }]);
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
+			runtime: createRuntimeFromMessages([
+				createAssistantMessage([{ type: "text", text: "Response to custom message" }]),
+			]),
 		};
 
 		// Should not throw - the custom message will be converted to user message
-		const stream = agentLoopContinue(context, config, undefined, streamFn);
+		const stream = agentLoopContinue(context, config);
 
 		const events: AgentEvent[] = [];
 		for await (const event of stream) {
@@ -612,5 +667,63 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const messages = await stream.result();
 		expect(messages.length).toBe(1);
 		expect(messages[0].role).toBe("assistant");
+	});
+
+	it("should end with an assistant error message when runtime throws before streaming", async () => {
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("Hello")], context, {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			runtime: createRuntime(() => {
+				throw new Error("runtime failed early");
+			}),
+		});
+
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const messages = await stream.result();
+		expect(messages).toHaveLength(2);
+		expect(messages[1]?.role).toBe("assistant");
+		if (messages[1]?.role === "assistant") {
+			expect(messages[1].stopReason).toBe("error");
+			expect(messages[1].errorMessage).toBe("runtime failed early");
+		}
+		expect(events[events.length - 1]?.type).toBe("agent_end");
+	});
+
+	it("should end continue streams with an assistant error message when runtime throws before streaming", async () => {
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [createUserMessage("Hello")],
+			tools: [],
+		};
+
+		const stream = agentLoopContinue(context, {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			runtime: createRuntime(() => {
+				throw new Error("continue failed early");
+			}),
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		expect(messages).toHaveLength(1);
+		expect(messages[0]?.role).toBe("assistant");
+		if (messages[0]?.role === "assistant") {
+			expect(messages[0].stopReason).toBe("error");
+			expect(messages[0].errorMessage).toBe("continue failed early");
+		}
 	});
 });
