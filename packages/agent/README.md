@@ -1,6 +1,6 @@
 # @mariozechner/pi-agent-core
 
-Stateful agent with tool execution and event streaming. Built on `@mariozechner/pi-ai`.
+Stateful agent with tool execution and event streaming. `pi-agent-core` now executes against an injected runtime boundary from `@mariozechner/pi-llm-runtime` and stores model identity as `ModelHandle`.
 
 ## Installation
 
@@ -8,17 +8,38 @@ Stateful agent with tool execution and event streaming. Built on `@mariozechner/
 npm install @mariozechner/pi-agent-core
 ```
 
+Install `@mariozechner/pi-llm-runtime` as well if you want the shared runtime types or the built-in BAML runtime adapter.
+
 ## Quick Start
 
 ```typescript
 import { Agent } from "@mariozechner/pi-agent-core";
-import { getModel } from "@mariozechner/pi-ai";
+import type { LlmRuntime, ModelHandle } from "@mariozechner/pi-llm-runtime";
+import { BamlRuntime } from "@mariozechner/pi-llm-runtime";
+
+const runtime: LlmRuntime = new BamlRuntime(client);
+const model: ModelHandle = {
+  id: "anthropic/claude-sonnet-4-20250514",
+  displayName: "Claude Sonnet 4",
+  family: "anthropic",
+  capabilities: {
+    tools: true,
+    images: true,
+    streaming: true,
+    thinking: true,
+  },
+  raw: {
+    provider: "anthropic",
+    model: "claude-sonnet-4-20250514",
+  },
+};
 
 const agent = new Agent({
   initialState: {
     systemPrompt: "You are a helpful assistant.",
-    model: getModel("anthropic", "claude-sonnet-4-20250514"),
+    model,
   },
+  runtime,
 });
 
 agent.subscribe((event) => {
@@ -30,6 +51,15 @@ agent.subscribe((event) => {
 
 await agent.prompt("Hello!");
 ```
+
+`runtime` is the execution boundary. `pi-agent-core` no longer ships a default provider runtime. If you do not pass a runtime, execution ends with an error event from the unconfigured runtime placeholder.
+
+## Runtime Boundary
+
+- `Agent` and `agentLoop()` consume an injected `runtime` plus a `ModelHandle`
+- `ModelHandle` is the runtime-facing model identity; callers should treat it as opaque
+- `systemPrompt` is bridged into the runtime as a leading `system` message before `runtime.stream()` executes
+- `@mariozechner/pi-ai` helpers such as `toModelHandle()` and `createPiAiCompatRuntime()` remain available only as compatibility shims for existing `pi-ai` model objects
 
 ## Core Concepts
 
@@ -50,6 +80,7 @@ AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → 
 
 1. **transformContext**: Prune old messages, inject external context
 2. **convertToLlm**: Filter out UI-only messages, convert custom types to LLM format
+3. **runtime bridge**: `systemPrompt` is prepended as a runtime `system` message before `runtime.stream()` executes
 
 ## Event Flow
 
@@ -141,9 +172,9 @@ const agent = new Agent({
   // Initial state
   initialState: {
     systemPrompt: string,
-    model: Model<any>,
+    model: ModelHandle,
     thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
-    tools: AgentTool<any>[],
+    tools: AgentTool[],
     messages: AgentMessage[],
   },
 
@@ -159,8 +190,8 @@ const agent = new Agent({
   // Follow-up mode: "one-at-a-time" (default) or "all"
   followUpMode: "one-at-a-time",
 
-  // Custom stream function (for proxy backends)
-  streamFn: streamProxy,
+  // Runtime implementation used for execution
+  runtime: myRuntime,
 
   // Session ID for provider caching
   sessionId: "session-123",
@@ -200,9 +231,9 @@ const agent = new Agent({
 ```typescript
 interface AgentState {
   systemPrompt: string;
-  model: Model<any>;
+  model: ModelHandle;
   thinkingLevel: ThinkingLevel;
-  tools: AgentTool<any>[];
+  tools: AgentTool[];
   messages: AgentMessage[];
   isStreaming: boolean;
   streamMessage: AgentMessage | null;  // Current partial during streaming
@@ -237,7 +268,7 @@ await agent.continue();
 
 ```typescript
 agent.setSystemPrompt("New prompt");
-agent.setModel(getModel("openai", "gpt-4o"));
+agent.setModel(model);
 agent.setThinkingLevel("medium");
 agent.setTools([myTool]);
 agent.setToolExecution("sequential");
@@ -391,20 +422,35 @@ Thrown errors are caught by the agent and reported to the LLM as tool errors wit
 
 ## Proxy Usage
 
-For browser apps that proxy through a backend:
+The agent no longer ships a built-in provider runtime. You must inject a runtime implementation through `runtime`.
+
+For browser apps that proxy through a backend, inject a runtime implementation and pass `ModelHandle`s:
 
 ```typescript
-import { Agent, streamProxy } from "@mariozechner/pi-agent-core";
+import { Agent } from "@mariozechner/pi-agent-core";
+import type { LlmRuntime } from "@mariozechner/pi-llm-runtime";
+
+const runtime: LlmRuntime = createRuntimeSomehow();
 
 const agent = new Agent({
-  streamFn: (model, context, options) =>
-    streamProxy(model, context, {
-      ...options,
-      authToken: "...",
-      proxyUrl: "https://your-server.com",
-    }),
+  initialState: {
+    model: {
+      id: "openai/gpt-4o",
+      displayName: "GPT-4o",
+      family: "openai",
+      capabilities: {
+        tools: true,
+        images: true,
+        streaming: true,
+      },
+      raw: { provider: "openai", model: "gpt-4o" },
+    },
+  },
+  runtime,
 });
 ```
+
+If you still have `pi-ai` `Model<Api>` objects, convert them with `toModelHandle()` and, if needed, execute them through `createPiAiCompatRuntime()`. Those helpers are for migration compatibility, not the primary runtime boundary.
 
 ## Low-Level API
 
@@ -412,6 +458,7 @@ For direct control without the Agent class:
 
 ```typescript
 import { agentLoop, agentLoopContinue } from "@mariozechner/pi-agent-core";
+import type { LlmRuntime, ModelHandle } from "@mariozechner/pi-llm-runtime";
 
 const context: AgentContext = {
   systemPrompt: "You are helpful.",
@@ -419,8 +466,22 @@ const context: AgentContext = {
   tools: [],
 };
 
+const runtime: LlmRuntime = createRuntimeSomehow();
+const model: ModelHandle = {
+  id: "openai/gpt-4o",
+  displayName: "GPT-4o",
+  family: "openai",
+  capabilities: {
+    tools: true,
+    images: true,
+    streaming: true,
+  },
+  raw: { provider: "openai", model: "gpt-4o" },
+};
+
 const config: AgentLoopConfig = {
-  model: getModel("openai", "gpt-4o"),
+  model,
+  runtime,
   convertToLlm: (msgs) => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
   toolExecution: "parallel",
   beforeToolCall: async ({ toolCall, args, context }) => undefined,

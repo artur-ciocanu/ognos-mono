@@ -3,42 +3,20 @@
  */
 
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@mariozechner/pi-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
-import { isValidThinkingLevel } from "../cli/args.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
+import { areModelHandlesEqual, type CodingAgentModelHandle, type PersistedModelReference } from "./model-handle.js";
 import type { ModelRegistry } from "./model-registry.js";
 
-/** Default model IDs for each known provider */
-export const defaultModelPerProvider: Record<KnownProvider, string> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-	anthropic: "claude-opus-4-6",
-	openai: "gpt-5.4",
-	"azure-openai-responses": "gpt-5.2",
-	"openai-codex": "gpt-5.4",
-	google: "gemini-2.5-pro",
-	"google-gemini-cli": "gemini-2.5-pro",
-	"google-antigravity": "gemini-3.1-pro-high",
-	"google-vertex": "gemini-3-pro-preview",
-	"github-copilot": "gpt-4o",
-	openrouter: "openai/gpt-5.1-codex",
-	"vercel-ai-gateway": "anthropic/claude-opus-4-6",
-	xai: "grok-4-fast-non-reasoning",
-	groq: "openai/gpt-oss-120b",
-	cerebras: "zai-glm-4.7",
-	zai: "glm-5",
-	mistral: "devstral-medium-latest",
-	minimax: "MiniMax-M2.7",
-	"minimax-cn": "MiniMax-M2.7",
-	huggingface: "moonshotai/Kimi-K2.5",
-	opencode: "claude-opus-4-6",
-	"opencode-go": "kimi-k2.5",
-	"kimi-coding": "kimi-k2-thinking",
-};
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+function isValidThinkingLevel(value: string): value is ThinkingLevel {
+	return VALID_THINKING_LEVELS.has(value as ThinkingLevel);
+}
 
 export interface ScopedModel {
-	model: Model<Api>;
+	model: CodingAgentModelHandle;
 	/** Thinking level if explicitly specified in pattern (e.g., "model:high"), undefined otherwise */
 	thinkingLevel?: ThinkingLevel;
 }
@@ -63,8 +41,8 @@ function isAlias(id: string): boolean {
  */
 export function findExactModelReferenceMatch(
 	modelReference: string,
-	availableModels: Model<Api>[],
-): Model<Api> | undefined {
+	availableModels: CodingAgentModelHandle[],
+): CodingAgentModelHandle | undefined {
 	const trimmedReference = modelReference.trim();
 	if (!trimmedReference) {
 		return undefined;
@@ -109,7 +87,10 @@ export function findExactModelReferenceMatch(
  * Try to match a pattern to a model from the available models list.
  * Returns the matched model or undefined if no match found.
  */
-function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Model<Api> | undefined {
+function tryMatchModel(
+	modelPattern: string,
+	availableModels: CodingAgentModelHandle[],
+): CodingAgentModelHandle | undefined {
 	const exactMatch = findExactModelReferenceMatch(modelPattern, availableModels);
 	if (exactMatch) {
 		return exactMatch;
@@ -142,26 +123,31 @@ function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Mod
 }
 
 export interface ParsedModelResult {
-	model: Model<Api> | undefined;
+	model: CodingAgentModelHandle | undefined;
 	/** Thinking level if explicitly specified in pattern, undefined otherwise */
 	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 }
 
-function buildFallbackModel(provider: string, modelId: string, availableModels: Model<Api>[]): Model<Api> | undefined {
-	const providerModels = availableModels.filter((m) => m.provider === provider);
-	if (providerModels.length === 0) return undefined;
+function buildFallbackModel(
+	provider: string,
+	modelId: string,
+	modelRegistry: ModelRegistry,
+): CodingAgentModelHandle | undefined {
+	return modelRegistry.createAdHocModel(provider, modelId);
+}
 
-	const defaultId = defaultModelPerProvider[provider as KnownProvider];
-	const baseModel = defaultId
-		? (providerModels.find((m) => m.id === defaultId) ?? providerModels[0])
-		: providerModels[0];
+function compareFallbackModelPriority(left: CodingAgentModelHandle, right: CodingAgentModelHandle): number {
+	const idComparison = left.id.toLowerCase().localeCompare(right.id.toLowerCase());
+	if (idComparison !== 0) {
+		return idComparison;
+	}
 
-	return {
-		...baseModel,
-		id: modelId,
-		name: modelId,
-	};
+	return left.modelHandleId.localeCompare(right.modelHandleId);
+}
+
+function pickDeterministicFallbackModel(models: CodingAgentModelHandle[]): CodingAgentModelHandle | undefined {
+	return [...models].sort(compareFallbackModelPriority)[0];
 }
 
 /**
@@ -179,7 +165,7 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
  */
 export function parseModelPattern(
 	pattern: string,
-	availableModels: Model<Api>[],
+	availableModels: CodingAgentModelHandle[],
 	options?: { allowInvalidThinkingLevelFallback?: boolean },
 ): ParsedModelResult {
 	// Try exact match first
@@ -276,7 +262,7 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 			}
 
 			for (const model of matchingModels) {
-				if (!scopedModels.find((sm) => modelsAreEqual(sm.model, model))) {
+				if (!scopedModels.find((sm) => areModelHandlesEqual(sm.model, model))) {
 					scopedModels.push({ model, thinkingLevel });
 				}
 			}
@@ -295,7 +281,7 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 		}
 
 		// Avoid duplicates
-		if (!scopedModels.find((sm) => modelsAreEqual(sm.model, model))) {
+		if (!scopedModels.find((sm) => areModelHandlesEqual(sm.model, model))) {
 			scopedModels.push({ model, thinkingLevel });
 		}
 	}
@@ -304,7 +290,7 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 }
 
 export interface ResolveCliModelResult {
-	model: Model<Api> | undefined;
+	model: CodingAgentModelHandle | undefined;
 	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	/**
@@ -439,7 +425,7 @@ export function resolveCliModel(options: {
 	}
 
 	if (provider) {
-		const fallbackModel = buildFallbackModel(provider, pattern, availableModels);
+		const fallbackModel = buildFallbackModel(provider, pattern, modelRegistry);
 		if (fallbackModel) {
 			const fallbackWarning = warning
 				? `${warning} Model "${pattern}" not found for provider "${provider}". Using custom model id.`
@@ -458,7 +444,7 @@ export function resolveCliModel(options: {
 }
 
 export interface InitialModelResult {
-	model: Model<Api> | undefined;
+	model: CodingAgentModelHandle | undefined;
 	thinkingLevel: ThinkingLevel;
 	fallbackMessage: string | undefined;
 }
@@ -467,15 +453,17 @@ export interface InitialModelResult {
  * Find the initial model to use based on priority:
  * 1. CLI args (provider + model)
  * 2. First model from scoped models (if not continuing/resuming)
- * 3. Restored from session (if continuing/resuming)
- * 4. Saved default from settings
- * 5. First available model with valid API key
+ * 3. Saved default from settings
+ * 4. Legacy saved default compatibility fields
+ * 5. Deterministically ranked available model with valid API key
  */
 export async function findInitialModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
 	scopedModels: ScopedModel[];
 	isContinuing: boolean;
+	defaultModelReference?: PersistedModelReference;
+	defaultModelHandleId?: string;
 	defaultProvider?: string;
 	defaultModelId?: string;
 	defaultThinkingLevel?: ThinkingLevel;
@@ -486,13 +474,15 @@ export async function findInitialModel(options: {
 		cliModel,
 		scopedModels,
 		isContinuing,
+		defaultModelReference,
+		defaultModelHandleId,
 		defaultProvider,
 		defaultModelId,
 		defaultThinkingLevel,
 		modelRegistry,
 	} = options;
 
-	let model: Model<Api> | undefined;
+	let model: CodingAgentModelHandle | undefined;
 	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 
 	// 1. CLI args take priority
@@ -521,6 +511,28 @@ export async function findInitialModel(options: {
 	}
 
 	// 3. Try saved default from settings
+	if (defaultModelReference) {
+		const found = modelRegistry.resolveStoredModel(defaultModelReference);
+		if (found) {
+			model = found;
+			if (defaultThinkingLevel) {
+				thinkingLevel = defaultThinkingLevel;
+			}
+			return { model, thinkingLevel, fallbackMessage: undefined };
+		}
+	}
+
+	if (defaultModelHandleId) {
+		const found = modelRegistry.findByPersistentModelHandleId(defaultModelHandleId);
+		if (found) {
+			model = found;
+			if (defaultThinkingLevel) {
+				thinkingLevel = defaultThinkingLevel;
+			}
+			return { model, thinkingLevel, fallbackMessage: undefined };
+		}
+	}
+
 	if (defaultProvider && defaultModelId) {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
 		if (found) {
@@ -532,21 +544,12 @@ export async function findInitialModel(options: {
 		}
 	}
 
-	// 4. Try first available model with valid API key
+	// 4. Try the deterministically ranked available model with a valid API key
 	const availableModels = await modelRegistry.getAvailable();
+	const fallbackModel = pickDeterministicFallbackModel(availableModels);
 
-	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				return { model: match, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
-			}
-		}
-
-		// If no default found, use first available
-		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+	if (fallbackModel) {
+		return { model: fallbackModel, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 	}
 
 	// 5. No model found
@@ -559,10 +562,10 @@ export async function findInitialModel(options: {
 export async function restoreModelFromSession(
 	savedProvider: string,
 	savedModelId: string,
-	currentModel: Model<Api> | undefined,
+	currentModel: CodingAgentModelHandle | undefined,
 	shouldPrintMessages: boolean,
 	modelRegistry: ModelRegistry,
-): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
+): Promise<{ model: CodingAgentModelHandle | undefined; fallbackMessage: string | undefined }> {
 	const restoredModel = modelRegistry.find(savedProvider, savedModelId);
 
 	// Check if restored model exists and has a valid API key
@@ -593,26 +596,11 @@ export async function restoreModelFromSession(
 		};
 	}
 
-	// Try to find any available model
+	// Try to find any available model using a deterministic fallback rule
 	const availableModels = await modelRegistry.getAvailable();
+	const fallbackModel = pickDeterministicFallbackModel(availableModels);
 
-	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		let fallbackModel: Model<Api> | undefined;
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				fallbackModel = match;
-				break;
-			}
-		}
-
-		// If no default found, use first available
-		if (!fallbackModel) {
-			fallbackModel = availableModels[0];
-		}
-
+	if (fallbackModel) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
 		}

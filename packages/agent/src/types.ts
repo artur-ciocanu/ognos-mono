@@ -3,27 +3,24 @@ import type {
 	AssistantMessageEvent,
 	ImageContent,
 	Message,
-	Model,
-	SimpleStreamOptions,
-	streamSimple,
 	TextContent,
 	Tool,
 	ToolResultMessage,
 } from "@mariozechner/pi-ai";
+import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
 import type { Static, TSchema } from "@sinclair/typebox";
+import type { AgentRuntime, AgentRuntimeOptions } from "./runtime-bridge.js";
 
 /**
- * Stream function used by the agent loop.
+ * Runtime stream function used by the agent loop.
  *
  * Contract:
  * - Must not throw or return a rejected promise for request/model/runtime failures.
- * - Must return an AssistantMessageEventStream.
- * - Failures must be encoded in the returned stream via protocol events and a
- *   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
+ * - Must return an async iterable of runtime events.
+ * - Failures must be encoded in the returned stream as `error` events.
  */
-export type StreamFn = (
-	...args: Parameters<typeof streamSimple>
-) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+export type StreamFn = AgentRuntime["stream"];
+export type { AgentRuntime, AgentRuntimeContext, AgentRuntimeEvent, AgentRuntimeOptions } from "./runtime-bridge.js";
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -86,15 +83,16 @@ export interface AfterToolCallContext {
 	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
-	result: AgentToolResult<any>;
+	result: AgentToolResult<unknown>;
 	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
 }
 
-export interface AgentLoopConfig extends SimpleStreamOptions {
-	model: Model<any>;
+export interface AgentLoopConfig extends AgentRuntimeOptions {
+	model: ModelHandle;
+	runtime?: AgentRuntime;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -154,7 +152,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Contract: must not throw or reject. Return undefined when no key is available.
 	 */
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (provider: string, model?: ModelHandle) => Promise<string | undefined> | string | undefined;
 
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
@@ -249,9 +247,9 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  */
 export interface AgentState {
 	systemPrompt: string;
-	model: Model<any>;
+	model: ModelHandle;
 	thinkingLevel: ThinkingLevel;
-	tools: AgentTool<any>[];
+	tools: AgentTool[];
 	messages: AgentMessage[]; // Can include attachments + custom message types
 	isStreaming: boolean;
 	streamMessage: AgentMessage | null;
@@ -267,25 +265,25 @@ export interface AgentToolResult<T> {
 }
 
 // Callback for streaming tool execution updates
-export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
+export type AgentToolUpdateCallback<T = unknown> = (partialResult: AgentToolResult<T>) => void;
 
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
-	execute: (
+	execute(
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
-	) => Promise<AgentToolResult<TDetails>>;
+	): Promise<AgentToolResult<TDetails>>;
 }
 
 // AgentContext is like Context but uses AgentTool
 export interface AgentContext {
 	systemPrompt: string;
 	messages: AgentMessage[];
-	tools?: AgentTool<any>[];
+	tools?: AgentTool[];
 }
 
 /**
@@ -305,6 +303,6 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: unknown }
+	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: unknown; partialResult: unknown }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError: boolean };

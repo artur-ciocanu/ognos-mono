@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent, createPiAiCompatRuntime, toModelHandle } from "@mariozechner/pi-agent-core";
 import { getModel } from "@mariozechner/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
@@ -46,10 +46,11 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		const agent = new Agent({
 			getApiKey: () => API_KEY,
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "You are a helpful assistant. Be extremely concise, reply with just a few words.",
 				tools: codingTools,
 			},
+			runtime: createPiAiCompatRuntime(),
 		});
 
 		sessionManager = noSession ? SessionManager.inMemory() : SessionManager.create(tempDir);

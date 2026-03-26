@@ -33,13 +33,16 @@ Tools for building AI agents and managing LLM deployments.
 
 | Package | Description |
 |---------|-------------|
-| **[@mariozechner/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@mariozechner/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@mariozechner/pi-ai](packages/ai)** | Provider catalogs, auth helpers, and compatibility shims for supported LLM APIs |
+| **[@mariozechner/pi-llm-runtime](packages/llm-runtime)** | Runtime boundary, BAML runtime adapter, and shared `ModelHandle` types |
+| **[@mariozechner/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management over an injected LLM runtime |
 | **[@mariozechner/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
 | **[@mariozechner/pi-mom](packages/mom)** | Slack bot that delegates messages to the pi coding agent |
 | **[@mariozechner/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
 | **[@mariozechner/pi-web-ui](packages/web-ui)** | Web components for AI chat interfaces |
 | **[@mariozechner/pi-pods](packages/pods)** | CLI for managing vLLM deployments on GPU pods |
+
+`pi-agent-core` cleanly supports injected runtimes through the `@mariozechner/pi-llm-runtime` boundary. `pi-coding-agent` is mid-migration: it already uses handle-based model identity and some runtime-boundary abstractions, but it still retains `pi-ai` compatibility and runtime-fallback seams in current execution paths. The current architecture is migration-in-progress, not a full `pi-ai` removal.
 
 ## Contributing
 

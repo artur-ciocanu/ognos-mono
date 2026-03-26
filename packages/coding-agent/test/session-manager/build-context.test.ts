@@ -56,8 +56,22 @@ function thinkingLevel(id: string, parentId: string | null, level: string): Thin
 	return { type: "thinking_level_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", thinkingLevel: level };
 }
 
-function modelChange(id: string, parentId: string | null, provider: string, modelId: string): ModelChangeEntry {
-	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", provider, modelId };
+function modelChange(
+	id: string,
+	parentId: string | null,
+	provider: string,
+	modelId: string,
+	modelHandleId = `handle://${provider}/${modelId}`,
+): ModelChangeEntry {
+	return {
+		type: "model_change",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		provider,
+		modelId,
+		modelHandleId,
+	};
 }
 
 describe("buildSessionContext", () => {
@@ -102,18 +116,46 @@ describe("buildSessionContext", () => {
 		it("tracks model from assistant message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries);
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			expect(ctx.model).toEqual({
+				authProvider: "anthropic",
+				modelId: "claude-test",
+				provider: "anthropic",
+			});
 		});
 
 		it("tracks model from model change entry", () => {
+			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), modelChange("2", "1", "openai", "gpt-4")];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.model).toEqual({
+				authProvider: "openai",
+				modelHandleId: "handle://openai/gpt-4",
+				modelId: "gpt-4",
+				provider: "openai",
+			});
+		});
+
+		it("falls back to assistant snapshot when no persisted model handle exists", () => {
+			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.model).toEqual({
+				authProvider: "anthropic",
+				modelId: "claude-test",
+				provider: "anthropic",
+			});
+		});
+
+		it("updates the restore target when a later assistant snapshot differs from an explicit model change", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				modelChange("2", "1", "openai", "gpt-4"),
-				msg("3", "2", "assistant", "hi"),
+				msg("3", "2", "assistant", "fallback used"),
 			];
 			const ctx = buildSessionContext(entries);
-			// Assistant message overwrites model change
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			expect(ctx.model).toEqual({
+				authProvider: "anthropic",
+				modelId: "claude-test",
+				provider: "anthropic",
+			});
 		});
 	});
 

@@ -46,6 +46,7 @@ import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
 import type { KeybindingsManager } from "../keybindings.js";
 import type { CustomMessage } from "../messages.js";
+import type { CodingAgentModelHandle } from "../model-handle.js";
 import type { ModelRegistry } from "../model-registry.js";
 import type {
 	BranchSummaryEntry,
@@ -271,7 +272,7 @@ export interface ExtensionContext {
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
-	model: Model<any> | undefined;
+	model: CodingAgentModelHandle | undefined;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
@@ -624,8 +625,8 @@ export type ModelSelectSource = "set" | "cycle" | "restore";
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {
 	type: "model_select";
-	model: Model<any>;
-	previousModel: Model<any> | undefined;
+	model: CodingAgentModelHandle;
+	previousModel: CodingAgentModelHandle | undefined;
 	source: ModelSelectSource;
 }
 
@@ -1127,7 +1128,7 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/** Set the current model. Returns false if no API key available. */
-	setModel(model: Model<any>): Promise<boolean>;
+	setModel(model: CodingAgentModelHandle | Model<Api>): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
@@ -1331,7 +1332,7 @@ export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
 export type RefreshToolsHandler = () => void;
 
-export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
+export type SetModelHandler = (model: CodingAgentModelHandle | Model<Api>) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
@@ -1383,7 +1384,7 @@ export interface ExtensionActions {
  * Required by all modes.
  */
 export interface ExtensionContextActions {
-	getModel: () => Model<any> | undefined;
+	getModel: () => CodingAgentModelHandle | undefined;
 	isIdle: () => boolean;
 	abort: () => void;
 	hasPendingMessages: () => boolean;

@@ -6,10 +6,11 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { ImageContent, Model } from "@mariozechner/pi-ai";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import type { SessionStats } from "../../core/agent-session.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
+import type { CodingAgentModelHandle } from "../../core/model-handle.js";
 import type { SourceInfo } from "../../core/source-info.js";
 
 // ============================================================================
@@ -88,7 +89,7 @@ export interface RpcSlashCommand {
 // ============================================================================
 
 export interface RpcSessionState {
-	model?: Model<any>;
+	model?: CodingAgentModelHandle;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
 	isCompacting: boolean;
@@ -124,21 +125,21 @@ export type RpcResponse =
 			type: "response";
 			command: "set_model";
 			success: true;
-			data: Model<any>;
+			data: CodingAgentModelHandle;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "cycle_model";
 			success: true;
-			data: { model: Model<any>; thinkingLevel: ThinkingLevel; isScoped: boolean } | null;
+			data: { model: CodingAgentModelHandle; thinkingLevel: ThinkingLevel; isScoped: boolean } | null;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_available_models";
 			success: true;
-			data: { models: Model<any>[] };
+			data: { models: CodingAgentModelHandle[] };
 	  }
 
 	// Thinking

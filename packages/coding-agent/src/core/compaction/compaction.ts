@@ -5,9 +5,8 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, AgentRuntime } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, Model, Usage } from "@mariozechner/pi-ai";
-import { completeSimple } from "@mariozechner/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -15,6 +14,7 @@ import {
 	createCustomMessage,
 } from "../messages.js";
 import type { CompactionEntry, SessionEntry } from "../session-manager.js";
+import { executeSummary } from "./summary-runtime.js";
 import {
 	computeFileLists,
 	createFileOps,
@@ -528,6 +528,7 @@ export async function generateSummary(
 	signal?: AbortSignal,
 	customInstructions?: string,
 	previousSummary?: string,
+	runtime?: AgentRuntime,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
@@ -560,23 +561,19 @@ export async function generateSummary(
 	const completionOptions = model.reasoning
 		? { maxTokens, signal, apiKey, reasoning: "high" as const }
 		: { maxTokens, signal, apiKey };
-
-	const response = await completeSimple(
+	const response = await executeSummary({
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		completionOptions,
-	);
+		systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+		messages: summarizationMessages,
+		runtime,
+		...completionOptions,
+	});
 
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
+	if (response.status === "error") {
+		throw new Error(`Summarization failed: ${response.error}`);
 	}
 
-	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
-
-	return textContent;
+	return response.status === "aborted" ? "" : response.text;
 }
 
 // ============================================================================
@@ -715,6 +712,7 @@ export async function compact(
 	apiKey: string,
 	customInstructions?: string,
 	signal?: AbortSignal,
+	runtime?: AgentRuntime,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -742,9 +740,10 @@ export async function compact(
 						signal,
 						customInstructions,
 						previousSummary,
+						runtime,
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
+			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal, runtime),
 		]);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -758,6 +757,7 @@ export async function compact(
 			signal,
 			customInstructions,
 			previousSummary,
+			runtime,
 		);
 	}
 
@@ -786,6 +786,7 @@ async function generateTurnPrefixSummary(
 	reserveTokens: number,
 	apiKey: string,
 	signal?: AbortSignal,
+	runtime?: AgentRuntime,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
@@ -799,18 +800,19 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await completeSimple(
+	const response = await executeSummary({
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey },
-	);
+		systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+		messages: summarizationMessages,
+		apiKey,
+		maxTokens,
+		signal,
+		runtime,
+	});
 
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
+	if (response.status === "error") {
+		throw new Error(`Turn prefix summarization failed: ${response.error}`);
 	}
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return response.status === "aborted" ? "" : response.text;
 }

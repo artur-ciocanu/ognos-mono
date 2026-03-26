@@ -1,4 +1,4 @@
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent, toModelHandle } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, getModel, type Usage } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
@@ -57,7 +57,7 @@ function createSession() {
 		agent: new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "You are a helpful assistant.",
 				tools: [],
 				thinkingLevel: "high",

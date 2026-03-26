@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { OAuthCredentials } from "@mariozechner/pi-ai";
 import { registerOAuthProvider } from "@mariozechner/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -457,6 +458,60 @@ describe("AuthStorage", () => {
 			const apiKey = await authStorage.getApiKey("anthropic");
 
 			expect(apiKey).toBe("stored-key");
+		});
+	});
+
+	describe("runtime injection", () => {
+		test("uses injected auth runtime for env, oauth, and provider listing", async () => {
+			const providerId = "runtime-oauth";
+			const oauthCredentials: OAuthCredentials = {
+				access: "expired-access",
+				refresh: "refresh-token",
+				expires: Date.now() - 1_000,
+			};
+
+			authStorage = AuthStorage.inMemory(
+				{
+					[providerId]: { type: "oauth", ...oauthCredentials },
+				},
+				{
+					getEnvApiKey: (provider) => (provider === "runtime-env" ? "runtime-env-key" : undefined),
+					getOAuthProvider: (id) =>
+						id === providerId
+							? {
+									id: providerId,
+									name: "Runtime OAuth",
+									login: async () => oauthCredentials,
+									refreshToken: async (credentials) => credentials,
+									getApiKey: (credentials) => `Bearer ${credentials.access}`,
+								}
+							: undefined,
+					getOAuthApiKey: async (id, credentials) =>
+						id === providerId && credentials[id]
+							? {
+									newCredentials: {
+										...credentials[id],
+										access: "refreshed-access",
+										expires: Date.now() + 60_000,
+									},
+									apiKey: "Bearer refreshed-access",
+								}
+							: null,
+					getOAuthProviders: () => [
+						{
+							id: providerId,
+							name: "Runtime OAuth",
+							login: async () => oauthCredentials,
+							refreshToken: async (credentials) => credentials,
+							getApiKey: (credentials) => `Bearer ${credentials.access}`,
+						},
+					],
+				},
+			);
+
+			expect(authStorage.hasAuth("runtime-env")).toBe(true);
+			expect(await authStorage.getApiKey(providerId)).toBe("Bearer refreshed-access");
+			expect(authStorage.getOAuthProviders().map((provider) => provider.id)).toEqual([providerId]);
 		});
 	});
 });

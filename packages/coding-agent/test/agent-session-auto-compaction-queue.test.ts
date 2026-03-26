@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent, toModelHandle } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, getModel } from "@mariozechner/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { toCodingAgentModelHandle } from "../src/core/model-handle.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -57,16 +58,16 @@ describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let tempDir: string;
+	const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-auto-compaction-queue-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		vi.useFakeTimers();
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "Test",
 				tools: [],
 			},
@@ -124,7 +125,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
-		const model = session.model!;
 		const overflowMessage: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
@@ -177,8 +177,49 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 	});
 
+	it("should treat provider-auth decoupled models as the same active model for overflow recovery", async () => {
+		session.agent.setModel(toCodingAgentModelHandle(model, "openrouter"));
+
+		const overflowMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "prompt is too long",
+			timestamp: Date.now(),
+		};
+
+		const runAutoCompactionSpy = vi
+			.spyOn(
+				session as unknown as {
+					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+				},
+				"_runAutoCompaction",
+			)
+			.mockResolvedValue();
+
+		const checkCompaction = (
+			session as unknown as {
+				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
+			}
+		)._checkCompaction.bind(session);
+
+		await checkCompaction(overflowMessage);
+
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("overflow", true);
+	});
+
 	it("should ignore stale pre-compaction assistant usage on pre-prompt compaction checks", async () => {
-		const model = session.model!;
 		const staleAssistantTimestamp = Date.now() - 10_000;
 		const staleAssistant: AssistantMessage = {
 			role: "assistant",
@@ -235,8 +276,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("should trigger threshold compaction for error messages using last successful usage", async () => {
-		const model = session.model!;
-
 		// A successful assistant message with high token usage (near context limit)
 		const successfulAssistant: AssistantMessage = {
 			role: "assistant",
@@ -305,8 +344,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {
-		const model = session.model!;
-
 		// An error message with no prior successful assistant in context
 		const errorAssistant: AssistantMessage = {
 			role: "assistant",
@@ -353,7 +390,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("should not trigger threshold compaction for error messages when only kept pre-compaction usage exists", async () => {
-		const model = session.model!;
 		const preCompactionTimestamp = Date.now() - 10_000;
 
 		// A "kept" assistant message from before compaction with high usage

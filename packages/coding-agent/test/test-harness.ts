@@ -10,8 +10,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { Agent } from "@mariozechner/pi-agent-core";
+import type { AgentRuntime, AgentTool } from "@mariozechner/pi-agent-core";
+import { Agent, toModelHandle } from "@mariozechner/pi-agent-core";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -313,6 +313,108 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 	return { streamFn, state };
 }
 
+function createFauxRuntime(
+	streamFn: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream,
+): AgentRuntime {
+	return {
+		configured: true,
+		async *stream(model, context, options = {}) {
+			const rawModel = model.raw;
+			if (
+				!rawModel ||
+				typeof rawModel !== "object" ||
+				!("api" in rawModel) ||
+				!("provider" in rawModel) ||
+				!("reasoning" in rawModel)
+			) {
+				yield { type: "error", error: new Error("Faux runtime requires a pi-ai model handle") };
+				return;
+			}
+
+			const stream = streamFn(
+				rawModel as Model<any>,
+				{
+					systemPrompt: "",
+					messages: context.rawMessages ?? [],
+					tools: context.tools,
+				},
+				{
+					signal: options.signal,
+					apiKey: options.apiKey,
+					reasoning: options.reasoning === "off" ? undefined : options.reasoning,
+					sessionId: options.sessionId,
+				},
+			);
+
+			for await (const event of stream) {
+				switch (event.type) {
+					case "start":
+						yield { type: "start", messageId: event.partial.responseId };
+						break;
+					case "text_start":
+						yield { type: "text_start", id: `text-${event.contentIndex}` };
+						break;
+					case "text_delta":
+						yield { type: "text_delta", id: `text-${event.contentIndex}`, delta: event.delta };
+						break;
+					case "text_end":
+						yield { type: "text_end", id: `text-${event.contentIndex}` };
+						break;
+					case "thinking_start":
+						yield { type: "thinking_start", id: `thinking-${event.contentIndex}` };
+						break;
+					case "thinking_delta":
+						yield { type: "thinking_delta", id: `thinking-${event.contentIndex}`, delta: event.delta };
+						break;
+					case "thinking_end":
+						yield { type: "thinking_end", id: `thinking-${event.contentIndex}` };
+						break;
+					case "toolcall_start": {
+						const content = event.partial.content[event.contentIndex];
+						yield {
+							type: "toolcall_start",
+							id: content?.type === "toolCall" ? content.id : `tool-${event.contentIndex}`,
+							toolName: content?.type === "toolCall" ? content.name : "tool",
+						};
+						break;
+					}
+					case "toolcall_delta": {
+						const content = event.partial.content[event.contentIndex];
+						yield {
+							type: "toolcall_delta",
+							id: content?.type === "toolCall" ? content.id : `tool-${event.contentIndex}`,
+							delta: event.delta,
+						};
+						break;
+					}
+					case "toolcall_end":
+						yield { type: "toolcall_end", id: event.toolCall.id };
+						break;
+					case "done":
+						yield {
+							type: "done",
+							messageId: event.message.responseId,
+							usage: {
+								inputTokens: event.message.usage.input,
+								outputTokens: event.message.usage.output,
+								cachedInputTokens: event.message.usage.cacheRead,
+								estimatedCost: event.message.usage.cost.total,
+							},
+							reason: event.reason,
+						};
+						break;
+					case "error":
+						yield {
+							type: "error",
+							error: new Error(event.error.errorMessage || "Faux runtime stream failed"),
+						};
+						break;
+				}
+			}
+		},
+	};
+}
+
 // ============================================================================
 // Session harness
 // ============================================================================
@@ -370,15 +472,16 @@ function createHarnessWithResourceLoader(
 	const model: Model<any> = options.contextWindow ? { ...baseModel, contextWindow: options.contextWindow } : baseModel;
 
 	const { streamFn, state: fauxState } = createFauxStreamFn(options.responses ?? ["ok"]);
+	const runtime = createFauxRuntime(streamFn);
 
 	const agent = new Agent({
 		getApiKey: () => "faux-key",
 		initialState: {
-			model,
+			model: toModelHandle(model),
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
 			tools: options.tools ?? [],
 		},
-		streamFn,
+		runtime,
 	});
 
 	const sessionManager = SessionManager.inMemory();

@@ -5,7 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { type ImageContent, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import chalk from "chalk";
 import { createInterface } from "readline";
 import { type Args, parseArgs, printHelp } from "./cli/args.js";
@@ -19,6 +19,7 @@ import { AuthStorage } from "./core/auth-storage.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { LoadExtensionsResult } from "./core/extensions/index.js";
 import { migrateKeybindingsConfigFile } from "./core/keybindings.js";
+import { areModelHandlesEqual, getAuthProvider, supportsXhighThinking } from "./core/model-handle.js";
 import { ModelRegistry } from "./core/model-registry.js";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
@@ -544,10 +545,17 @@ function buildSessionOptions(
 
 	if (!options.model && scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
 		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+		const savedHandleId = settingsManager.getDefaultModelHandleId();
+		const savedSelection = settingsManager.getDefaultModelSelection();
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
-		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
+		const savedModel =
+			(savedSelection ? modelRegistry.resolveStoredModel(savedSelection) : undefined) ??
+			(savedHandleId ? modelRegistry.findByPersistentModelHandleId(savedHandleId) : undefined) ??
+			(savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined);
+		const savedInScope = savedModel
+			? scopedModels.find((sm) => areModelHandlesEqual(sm.model, savedModel))
+			: undefined;
 
 		if (savedInScope) {
 			options.model = savedInScope.model;
@@ -817,7 +825,13 @@ export async function main(args: string[]) {
 			);
 			process.exit(1);
 		}
-		authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+		const runtimeOverrideProviders = new Set([
+			sessionOptions.model.provider,
+			getAuthProvider(sessionOptions.model) ?? sessionOptions.model.provider,
+		]);
+		for (const provider of runtimeOverrideProviders) {
+			authStorage.setRuntimeApiKey(provider, parsed.apiKey);
+		}
 	}
 
 	const { session, modelFallbackMessage } = await createAgentSession(sessionOptions);
@@ -837,7 +851,7 @@ export async function main(args: string[]) {
 		let effectiveThinking = session.thinkingLevel;
 		if (!session.model.reasoning) {
 			effectiveThinking = "off";
-		} else if (effectiveThinking === "xhigh" && !supportsXhigh(session.model)) {
+		} else if (effectiveThinking === "xhigh" && !supportsXhighThinking(session.model)) {
 			effectiveThinking = "high";
 		}
 		if (effectiveThinking !== session.thinkingLevel) {

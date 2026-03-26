@@ -1,14 +1,21 @@
-import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
 import { getModel } from "@mariozechner/pi-ai";
+import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.js";
+import { Agent, createPiAiCompatRuntime, toModelHandle } from "../src/index.js";
+import type { AgentTool } from "../src/types.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { calculateTool } from "./utils/calculate.js";
+import { calculateTool as calculateToolBase } from "./utils/calculate.js";
+
+const calculateToolSchema = Type.Object({ expression: Type.String() });
+const calculateTool: AgentTool<typeof calculateToolSchema, undefined> = calculateToolBase;
 
 delete process.env.ANTHROPIC_OAUTH_TOKEN;
 
-async function basicPrompt(model: Model<any>) {
+async function basicPrompt(model: ModelHandle) {
 	const agent = new Agent({
+		runtime: createPiAiCompatRuntime(),
 		initialState: {
 			systemPrompt: "You are a helpful assistant. Keep your responses concise.",
 			model,
@@ -34,8 +41,9 @@ async function basicPrompt(model: Model<any>) {
 	expect(textContent.text).toContain("4");
 }
 
-async function toolExecution(model: Model<any>) {
+async function toolExecution(model: ModelHandle) {
 	const agent = new Agent({
+		runtime: createPiAiCompatRuntime(),
 		initialState: {
 			systemPrompt: "You are a helpful assistant. Always use the calculator tool for math.",
 			model,
@@ -54,8 +62,8 @@ async function toolExecution(model: Model<any>) {
 	if (toolResultMsg?.role !== "toolResult") throw new Error("Expected tool result message");
 	const textContent =
 		toolResultMsg.content
-			?.filter((c) => c.type === "text")
-			.map((c: any) => c.text)
+			?.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
 			.join("\n") || "";
 	expect(textContent).toBeDefined();
 
@@ -75,8 +83,9 @@ async function toolExecution(model: Model<any>) {
 	expect(hasNumber).toBe(true);
 }
 
-async function abortExecution(model: Model<any>) {
+async function abortExecution(model: ModelHandle) {
 	const agent = new Agent({
+		runtime: createPiAiCompatRuntime(),
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -104,8 +113,9 @@ async function abortExecution(model: Model<any>) {
 	expect(agent.state.error).toBe(lastMessage.errorMessage);
 }
 
-async function stateUpdates(model: Model<any>) {
+async function stateUpdates(model: ModelHandle) {
 	const agent = new Agent({
+		runtime: createPiAiCompatRuntime(),
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -136,8 +146,9 @@ async function stateUpdates(model: Model<any>) {
 	expect(agent.state.messages.length).toBe(2); // User message + assistant response
 }
 
-async function multiTurnConversation(model: Model<any>) {
+async function multiTurnConversation(model: ModelHandle) {
 	const agent = new Agent({
+		runtime: createPiAiCompatRuntime(),
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -161,7 +172,7 @@ async function multiTurnConversation(model: Model<any>) {
 
 describe("Agent E2E Tests", () => {
 	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider (gemini-2.5-flash)", () => {
-		const model = getModel("google", "gemini-2.5-flash");
+		const model = toModelHandle(getModel("google", "gemini-2.5-flash"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -185,7 +196,7 @@ describe("Agent E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Provider (gpt-4o-mini)", () => {
-		const model = getModel("openai", "gpt-4o-mini");
+		const model = toModelHandle(getModel("openai", "gpt-4o-mini"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -209,7 +220,7 @@ describe("Agent E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider (claude-haiku-4-5)", () => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = toModelHandle(getModel("anthropic", "claude-haiku-4-5"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -233,7 +244,7 @@ describe("Agent E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider (grok-3)", () => {
-		const model = getModel("xai", "grok-3");
+		const model = toModelHandle(getModel("xai", "grok-3"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -257,7 +268,7 @@ describe("Agent E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider (openai/gpt-oss-20b)", () => {
-		const model = getModel("groq", "openai/gpt-oss-20b");
+		const model = toModelHandle(getModel("groq", "openai/gpt-oss-20b"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -305,7 +316,7 @@ describe("Agent E2E Tests", () => {
 	});*/
 
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider (glm-4.5-air)", () => {
-		const model = getModel("zai", "glm-4.5-air");
+		const model = toModelHandle(getModel("zai", "glm-4.5-air"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -329,7 +340,7 @@ describe("Agent E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock Provider (claude-sonnet-4-5)", () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0");
+		const model = toModelHandle(getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0"));
 
 		it("should handle basic text prompt", async () => {
 			await basicPrompt(model);
@@ -357,9 +368,10 @@ describe("Agent.continue()", () => {
 	describe("validation", () => {
 		it("should throw when no messages in context", async () => {
 			const agent = new Agent({
+				runtime: createPiAiCompatRuntime(),
 				initialState: {
 					systemPrompt: "Test",
-					model: getModel("openai", "gpt-5.4"),
+					model: toModelHandle(getModel("openai", "gpt-5.4")),
 				},
 			});
 
@@ -368,9 +380,10 @@ describe("Agent.continue()", () => {
 
 		it("should throw when last message is assistant", async () => {
 			const agent = new Agent({
+				runtime: createPiAiCompatRuntime(),
 				initialState: {
 					systemPrompt: "Test",
-					model: getModel("openai", "gpt-5.4"),
+					model: toModelHandle(getModel("openai", "gpt-5.4")),
 				},
 			});
 
@@ -398,10 +411,11 @@ describe("Agent.continue()", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("continue from user message", () => {
-		const model = getModel("openai", "gpt-5.4");
+		const model = toModelHandle(getModel("openai", "gpt-5.4"));
 
 		it("should continue and get response when last message is user", async () => {
 			const agent = new Agent({
+				runtime: createPiAiCompatRuntime(),
 				initialState: {
 					systemPrompt: "You are a helpful assistant. Follow instructions exactly.",
 					model,
@@ -436,10 +450,11 @@ describe("Agent.continue()", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("continue from tool result", () => {
-		const model = getModel("openai", "gpt-5.4");
+		const model = toModelHandle(getModel("openai", "gpt-5.4"));
 
 		it("should continue and process tool results", async () => {
 			const agent = new Agent({
+				runtime: createPiAiCompatRuntime(),
 				initialState: {
 					systemPrompt:
 						"You are a helpful assistant. After getting a calculation result, state the answer clearly.",

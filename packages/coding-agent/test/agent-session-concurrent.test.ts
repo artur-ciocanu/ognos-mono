@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent, toModelHandle } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,7 +14,7 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { createTestResourceLoader } from "./utilities.js";
+import { createCompatRuntimeFromStreamFn, createTestResourceLoader } from "./utilities.js";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -76,11 +76,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "Test",
 				tools: [],
 			},
-			streamFn: (_model, _context, options) => {
+			runtime: createCompatRuntimeFromStreamFn((_model, _context, options) => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -95,7 +95,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					checkAbort();
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();
@@ -177,18 +177,18 @@ describe("AgentSession concurrent prompt guard", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "Test",
 				tools: [],
 			},
-			streamFn: () => {
+			runtime: createCompatRuntimeFromStreamFn(() => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();
@@ -238,11 +238,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "Test",
 				tools: [tool],
 			},
-			streamFn: async (_model, context) => {
+			runtime: createCompatRuntimeFromStreamFn(async (_model, context) => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
@@ -294,7 +294,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "done", reason: "toolUse", message });
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();
@@ -374,11 +374,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: toModelHandle(model),
 				systemPrompt: "Test",
 				tools: [tool],
 			},
-			streamFn: async (_model, context) => {
+			runtime: createCompatRuntimeFromStreamFn(async (_model, context) => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
@@ -431,7 +431,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "done", reason: "toolUse", message });
 				});
 				return stream;
-			},
+			}),
 		});
 
 		const sessionManager = SessionManager.inMemory();

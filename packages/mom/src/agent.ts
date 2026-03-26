@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, createPiAiCompatRuntime, toModelHandle } from "@mariozechner/pi-agent-core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
@@ -435,12 +435,13 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
-			model,
+			model: toModelHandle(model),
 			thinkingLevel: "off",
 			tools,
 		},
 		convertToLlm,
 		getApiKey: async () => getAnthropicApiKey(authStorage),
+		runtime: createPiAiCompatRuntime(),
 	});
 
 	// Load existing messages

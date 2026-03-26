@@ -1,5 +1,19 @@
+import type { AgentRuntime } from "@mariozechner/pi-agent-core";
 import type { Api, Context, Model, SimpleStreamOptions } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
+
+const PROXY_RUNTIME_MARKER = Symbol("pi-web-ui.proxy-runtime");
+
+type RuntimeModel = Parameters<AgentRuntime["stream"]>[0];
+
+type ProxyWrappedRuntime = AgentRuntime & {
+	[PROXY_RUNTIME_MARKER]?: true;
+};
+
+interface ProxyableRuntimeModel {
+	family?: string;
+	raw?: unknown;
+}
 
 /**
  * Centralized proxy decision logic.
@@ -136,4 +150,68 @@ export function createStreamFn(getProxyUrl: () => Promise<string | undefined>) {
 		const proxiedModel = applyProxyIfNeeded(model, apiKey, proxyUrl);
 		return streamSimple(proxiedModel, context, options);
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isPiAiModel(value: unknown): value is Model<Api> {
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.api === "string" &&
+		typeof value.provider === "string" &&
+		typeof value.reasoning === "boolean" &&
+		typeof value.baseUrl === "string"
+	);
+}
+
+function isProxyableRuntimeModel(value: unknown): value is RuntimeModel & ProxyableRuntimeModel {
+	return isRecord(value);
+}
+
+function applyProxyToRuntimeModel(model: unknown, apiKey: string, proxyUrl?: string): unknown {
+	if (!isProxyableRuntimeModel(model)) {
+		return model;
+	}
+
+	if (!isPiAiModel(model.raw)) {
+		return model;
+	}
+
+	const proxiedRawModel = applyProxyIfNeeded(model.raw, apiKey, proxyUrl);
+	if (proxiedRawModel === model.raw) {
+		return model;
+	}
+
+	return {
+		...model,
+		family: proxiedRawModel.provider,
+		raw: proxiedRawModel,
+	};
+}
+
+export function createProxyRuntime(
+	runtime: AgentRuntime,
+	getProxyUrl: () => Promise<string | undefined>,
+): AgentRuntime {
+	const wrappedRuntime = runtime as ProxyWrappedRuntime;
+	if (wrappedRuntime[PROXY_RUNTIME_MARKER]) {
+		return runtime;
+	}
+
+	const proxyRuntime: ProxyWrappedRuntime = {
+		get configured() {
+			return runtime.configured;
+		},
+		async *stream(model, context, options) {
+			const proxyUrl = await getProxyUrl();
+			const proxiedModel =
+				options?.apiKey && proxyUrl ? applyProxyToRuntimeModel(model, options.apiKey, proxyUrl) : model;
+			yield* runtime.stream(proxiedModel, context, options);
+		},
+	};
+	proxyRuntime[PROXY_RUNTIME_MARKER] = true;
+	return proxyRuntime;
 }

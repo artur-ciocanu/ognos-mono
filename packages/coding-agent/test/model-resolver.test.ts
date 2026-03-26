@@ -1,10 +1,11 @@
 import type { Model } from "@mariozechner/pi-ai";
 import { describe, expect, test } from "vitest";
+import { createPersistentModelHandleId, toCodingAgentModelHandle } from "../src/core/model-handle.js";
 import {
-	defaultModelPerProvider,
 	findInitialModel,
 	parseModelPattern,
 	resolveCliModel,
+	restoreModelFromSession,
 } from "../src/core/model-resolver.js";
 
 // Mock models for testing
@@ -64,25 +65,26 @@ const mockOpenRouterModels: Model<"anthropic-messages">[] = [
 ];
 
 const allModels = [...mockModels, ...mockOpenRouterModels];
+const allHandles = allModels.map((model) => toCodingAgentModelHandle(model));
 
 describe("parseModelPattern", () => {
 	describe("simple patterns without colons", () => {
 		test("exact match returns model with undefined thinking level", () => {
-			const result = parseModelPattern("claude-sonnet-4-5", allModels);
+			const result = parseModelPattern("claude-sonnet-4-5", allHandles);
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toBeUndefined();
 		});
 
 		test("partial match returns best model with undefined thinking level", () => {
-			const result = parseModelPattern("sonnet", allModels);
+			const result = parseModelPattern("sonnet", allHandles);
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toBeUndefined();
 		});
 
 		test("no match returns undefined model and thinking level", () => {
-			const result = parseModelPattern("nonexistent", allModels);
+			const result = parseModelPattern("nonexistent", allHandles);
 			expect(result.model).toBeUndefined();
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toBeUndefined();
@@ -91,14 +93,14 @@ describe("parseModelPattern", () => {
 
 	describe("patterns with valid thinking levels", () => {
 		test("sonnet:high returns sonnet with high thinking level", () => {
-			const result = parseModelPattern("sonnet:high", allModels);
+			const result = parseModelPattern("sonnet:high", allHandles);
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
 			expect(result.thinkingLevel).toBe("high");
 			expect(result.warning).toBeUndefined();
 		});
 
 		test("gpt-4o:medium returns gpt-4o with medium thinking level", () => {
-			const result = parseModelPattern("gpt-4o:medium", allModels);
+			const result = parseModelPattern("gpt-4o:medium", allHandles);
 			expect(result.model?.id).toBe("gpt-4o");
 			expect(result.thinkingLevel).toBe("medium");
 			expect(result.warning).toBeUndefined();
@@ -106,7 +108,7 @@ describe("parseModelPattern", () => {
 
 		test("all valid thinking levels work", () => {
 			for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
-				const result = parseModelPattern(`sonnet:${level}`, allModels);
+				const result = parseModelPattern(`sonnet:${level}`, allHandles);
 				expect(result.model?.id).toBe("claude-sonnet-4-5");
 				expect(result.thinkingLevel).toBe(level);
 				expect(result.warning).toBeUndefined();
@@ -116,7 +118,7 @@ describe("parseModelPattern", () => {
 
 	describe("patterns with invalid thinking levels", () => {
 		test("sonnet:random returns sonnet with undefined thinking level and warning", () => {
-			const result = parseModelPattern("sonnet:random", allModels);
+			const result = parseModelPattern("sonnet:random", allHandles);
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toContain("Invalid thinking level");
@@ -124,7 +126,7 @@ describe("parseModelPattern", () => {
 		});
 
 		test("gpt-4o:invalid returns gpt-4o with undefined thinking level and warning", () => {
-			const result = parseModelPattern("gpt-4o:invalid", allModels);
+			const result = parseModelPattern("gpt-4o:invalid", allHandles);
 			expect(result.model?.id).toBe("gpt-4o");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toContain("Invalid thinking level");
@@ -133,14 +135,14 @@ describe("parseModelPattern", () => {
 
 	describe("OpenRouter models with colons in IDs", () => {
 		test("qwen3-coder:exacto matches the model with undefined thinking level", () => {
-			const result = parseModelPattern("qwen/qwen3-coder:exacto", allModels);
+			const result = parseModelPattern("qwen/qwen3-coder:exacto", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toBeUndefined();
 		});
 
 		test("openrouter/qwen/qwen3-coder:exacto matches with provider prefix", () => {
-			const result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto", allModels);
+			const result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.thinkingLevel).toBeUndefined();
@@ -148,14 +150,14 @@ describe("parseModelPattern", () => {
 		});
 
 		test("qwen3-coder:exacto:high matches model with high thinking level", () => {
-			const result = parseModelPattern("qwen/qwen3-coder:exacto:high", allModels);
+			const result = parseModelPattern("qwen/qwen3-coder:exacto:high", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.thinkingLevel).toBe("high");
 			expect(result.warning).toBeUndefined();
 		});
 
 		test("openrouter/qwen/qwen3-coder:exacto:high matches with provider and thinking level", () => {
-			const result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto:high", allModels);
+			const result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto:high", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.thinkingLevel).toBe("high");
@@ -163,7 +165,7 @@ describe("parseModelPattern", () => {
 		});
 
 		test("gpt-4o:extended matches the extended model with undefined thinking level", () => {
-			const result = parseModelPattern("openai/gpt-4o:extended", allModels);
+			const result = parseModelPattern("openai/gpt-4o:extended", allHandles);
 			expect(result.model?.id).toBe("openai/gpt-4o:extended");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toBeUndefined();
@@ -172,7 +174,7 @@ describe("parseModelPattern", () => {
 
 	describe("invalid thinking levels with OpenRouter models", () => {
 		test("qwen3-coder:exacto:random returns model with undefined thinking level and warning", () => {
-			const result = parseModelPattern("qwen/qwen3-coder:exacto:random", allModels);
+			const result = parseModelPattern("qwen/qwen3-coder:exacto:random", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toContain("Invalid thinking level");
@@ -180,7 +182,7 @@ describe("parseModelPattern", () => {
 		});
 
 		test("qwen3-coder:exacto:high:random returns model with undefined thinking level and warning", () => {
-			const result = parseModelPattern("qwen/qwen3-coder:exacto:high:random", allModels);
+			const result = parseModelPattern("qwen/qwen3-coder:exacto:high:random", allHandles);
 			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.warning).toContain("Invalid thinking level");
@@ -191,13 +193,13 @@ describe("parseModelPattern", () => {
 	describe("edge cases", () => {
 		test("empty pattern matches via partial matching", () => {
 			// Empty string is included in all model IDs, so partial matching finds a match
-			const result = parseModelPattern("", allModels);
+			const result = parseModelPattern("", allHandles);
 			expect(result.model).not.toBeNull();
 			expect(result.thinkingLevel).toBeUndefined();
 		});
 
 		test("pattern ending with colon treats empty suffix as invalid", () => {
-			const result = parseModelPattern("sonnet:", allModels);
+			const result = parseModelPattern("sonnet:", allHandles);
 			// Empty string after colon is not a valid thinking level
 			// So it tries to match "sonnet:" which won't match, then tries "sonnet"
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
@@ -209,7 +211,7 @@ describe("parseModelPattern", () => {
 describe("resolveCliModel", () => {
 	test("resolves --model provider/id without --provider", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -224,7 +226,7 @@ describe("resolveCliModel", () => {
 
 	test("resolves fuzzy patterns within an explicit provider", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -240,7 +242,7 @@ describe("resolveCliModel", () => {
 
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -255,7 +257,7 @@ describe("resolveCliModel", () => {
 
 	test("prefers exact model id match over provider inference (OpenRouter-style ids)", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -270,7 +272,15 @@ describe("resolveCliModel", () => {
 
 	test("does not strip invalid :suffix as thinking level in --model (treat as raw id)", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
+			createAdHocModel: (provider: string, modelId: string) => {
+				const base = allHandles.find((model) => model.provider === provider)!;
+				return toCodingAgentModelHandle({
+					...base.raw,
+					id: modelId,
+					name: modelId,
+				});
+			},
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -286,7 +296,15 @@ describe("resolveCliModel", () => {
 
 	test("allows custom model ids for explicit providers without double prefixing", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
+			createAdHocModel: (provider: string, modelId: string) => {
+				const base = allHandles.find((model) => model.provider === provider)!;
+				return toCodingAgentModelHandle({
+					...base.raw,
+					id: modelId,
+					name: modelId,
+				});
+			},
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -298,6 +316,11 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openrouter");
 		expect(result.model?.id).toBe("openai/ghost-model");
+		expect(result.model?.displayName).toBe("openai/ghost-model");
+		expect(result.model?.modelHandleId).toBe(
+			createPersistentModelHandleId("openrouter", "openrouter", "openai/ghost-model"),
+		);
+		expect(result.model?.raw.id).toBe("openai/ghost-model");
 	});
 
 	test("returns a clear error when there are no models", () => {
@@ -343,7 +366,7 @@ describe("resolveCliModel", () => {
 			maxTokens: 8192,
 		};
 		const registry = {
-			getAll: () => [...allModels, zaiModel, gatewayModel],
+			getAll: () => [...allHandles, toCodingAgentModelHandle(zaiModel), toCodingAgentModelHandle(gatewayModel)],
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -358,7 +381,7 @@ describe("resolveCliModel", () => {
 
 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -373,25 +396,17 @@ describe("resolveCliModel", () => {
 });
 
 describe("default model selection", () => {
-	test("openai defaults are gpt-5.4", () => {
-		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
-		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.4");
-	});
-
-	test("zai, minimax, and cerebras defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5");
-		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider.cerebras).toBe("zai-glm-4.7");
-	});
-
-	test("ai-gateway default is opus 4.6", () => {
-		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("anthropic/claude-opus-4-6");
-	});
-
 	test("findInitialModel accepts explicit provider custom model ids", async () => {
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => allHandles,
+			createAdHocModel: (provider: string, modelId: string) => {
+				const base = allHandles.find((model) => model.provider === provider)!;
+				return toCodingAgentModelHandle({
+					...base.raw,
+					id: modelId,
+					name: modelId,
+				});
+			},
 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
 
 		const result = await findInitialModel({
@@ -407,7 +422,7 @@ describe("default model selection", () => {
 	});
 
 	test("findInitialModel selects ai-gateway default when available", async () => {
-		const aiGatewayModel: Model<"anthropic-messages"> = {
+		const aiGatewayModel = toCodingAgentModelHandle({
 			id: "anthropic/claude-opus-4-6",
 			name: "Claude Opus 4.6",
 			api: "anthropic-messages",
@@ -418,7 +433,7 @@ describe("default model selection", () => {
 			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 5 },
 			contextWindow: 200000,
 			maxTokens: 8192,
-		};
+		});
 
 		const registry = {
 			getAvailable: async () => [aiGatewayModel],
@@ -432,5 +447,142 @@ describe("default model selection", () => {
 
 		expect(result.model?.provider).toBe("vercel-ai-gateway");
 		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
+	});
+
+	test("findInitialModel resolves saved opaque model handle ids without defaultProvider", async () => {
+		const handleId = createPersistentModelHandleId("openrouter", "openrouter", "openai/gpt-4o:extended");
+		const registry = {
+			findByPersistentModelHandleId: (handleId: string) =>
+				handleId === createPersistentModelHandleId("openrouter", "openrouter", "openai/gpt-4o:extended")
+					? {
+							...toCodingAgentModelHandle(mockOpenRouterModels[1]),
+							modelHandleId: handleId,
+						}
+					: undefined,
+			getAvailable: async () => [],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultModelHandleId: handleId,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("openai/gpt-4o:extended");
+	});
+
+	test("findInitialModel falls back to legacy provider/model settings when defaultModel is not a handle id", async () => {
+		const registry = {
+			findByPersistentModelHandleId: () => undefined,
+			find: (provider: string, modelId: string) =>
+				provider === "openrouter" && modelId === "openai/gpt-4o:extended"
+					? toCodingAgentModelHandle(mockOpenRouterModels[1])
+					: undefined,
+			getAvailable: async () => [],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultModelHandleId: "openai/gpt-4o:extended",
+			defaultProvider: "openrouter",
+			defaultModelId: "openai/gpt-4o:extended",
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("openai/gpt-4o:extended");
+	});
+
+	test("findInitialModel restores persisted ad hoc custom settings selections", async () => {
+		const handleId = createPersistentModelHandleId("openrouter", "openrouter", "openai/ghost-model");
+		const adHocModel = toCodingAgentModelHandle({
+			...mockOpenRouterModels[0],
+			id: "openai/ghost-model",
+			name: "openai/ghost-model",
+		});
+		const registry = {
+			resolveStoredModel: (reference: {
+				modelHandleId?: string;
+				authProvider?: string;
+				provider?: string;
+				modelId: string;
+			}) =>
+				reference.modelHandleId === handleId &&
+				reference.authProvider === "openrouter" &&
+				reference.provider === "openrouter" &&
+				reference.modelId === "openai/ghost-model"
+					? { ...adHocModel, modelHandleId: handleId }
+					: undefined,
+			getAvailable: async () => [],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultModelReference: {
+				modelHandleId: handleId,
+				authProvider: "openrouter",
+				provider: "openrouter",
+				modelId: "openai/ghost-model",
+			},
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("openai/ghost-model");
+		expect(result.model?.modelHandleId).toBe(handleId);
+	});
+
+	test("findInitialModel uses deterministic fallback ordering instead of registry order", async () => {
+		const lexicallyLaterIdModel = toCodingAgentModelHandle({
+			...mockModels[0],
+			id: "zz-model",
+			name: "ZZ Model",
+		});
+		const lexicallyEarlierIdModel = toCodingAgentModelHandle({
+			...mockModels[0],
+			id: "aa-model",
+			name: "AA Model",
+		});
+		const registry = {
+			getAvailable: async () => [lexicallyLaterIdModel, lexicallyEarlierIdModel],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.modelHandleId).toBe(lexicallyEarlierIdModel.modelHandleId);
+		expect(result.model?.id).toBe("aa-model");
+	});
+});
+
+describe("restoreModelFromSession", () => {
+	test("uses deterministic fallback ordering when the saved model cannot be restored", async () => {
+		const lexicallyLaterIdModel = toCodingAgentModelHandle({
+			...mockModels[0],
+			id: "zz-model",
+			name: "ZZ Model",
+		});
+		const lexicallyEarlierIdModel = toCodingAgentModelHandle({
+			...mockModels[0],
+			id: "aa-model",
+			name: "AA Model",
+		});
+		const registry = {
+			find: () => undefined,
+			getApiKey: async () => undefined,
+			getAvailable: async () => [lexicallyLaterIdModel, lexicallyEarlierIdModel],
+		} as unknown as Parameters<typeof restoreModelFromSession>[4];
+
+		const result = await restoreModelFromSession("missing-provider", "missing-model", undefined, false, registry);
+
+		expect(result.model?.modelHandleId).toBe(lexicallyEarlierIdModel.modelHandleId);
+		expect(result.fallbackMessage).toContain("Using anthropic/aa-model");
 	});
 });

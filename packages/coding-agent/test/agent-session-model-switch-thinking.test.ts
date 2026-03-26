@@ -1,8 +1,9 @@
-import { Agent, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import { Agent, type ThinkingLevel, toModelHandle } from "@mariozechner/pi-agent-core";
 import { getModel } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { toCodingAgentModelHandle } from "../src/core/model-handle.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -18,7 +19,7 @@ function createSession({
 }: {
 	thinkingLevel?: ThinkingLevel;
 	defaultThinkingLevel?: ThinkingLevel;
-	scopedModels?: Array<{ model: typeof reasoningModel; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: ReturnType<typeof toCodingAgentModelHandle>; thinkingLevel?: ThinkingLevel }>;
 } = {}) {
 	const settingsManager = SettingsManager.inMemory({ defaultThinkingLevel });
 	const sessionManager = SessionManager.inMemory();
@@ -28,7 +29,7 @@ function createSession({
 		agent: new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model: reasoningModel,
+				model: toModelHandle(reasoningModel),
 				systemPrompt: "You are a helpful assistant.",
 				tools: [],
 				thinkingLevel,
@@ -48,7 +49,10 @@ function createSession({
 describe("AgentSession model switching", () => {
 	it("preserves the saved thinking preference through non-reasoning models", async () => {
 		const { session, sessionManager, settingsManager } = createSession({
-			scopedModels: [{ model: reasoningModel }, { model: nonReasoningModel }],
+			scopedModels: [
+				{ model: toCodingAgentModelHandle(reasoningModel) },
+				{ model: toCodingAgentModelHandle(nonReasoningModel) },
+			],
 		});
 
 		try {
@@ -72,6 +76,23 @@ describe("AgentSession model switching", () => {
 					.filter((entry) => entry.type === "thinking_level_change")
 					.map((entry) => entry.thinkingLevel),
 			).toEqual(["off", "high", "off", "high"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("normalizes plain pi-ai models before persisting setModel selections", async () => {
+		const { session, sessionManager, settingsManager } = createSession();
+
+		try {
+			await session.setModel(nonReasoningModel);
+
+			const modelChanges = sessionManager.getEntries().filter((entry) => entry.type === "model_change");
+			expect(modelChanges).toHaveLength(1);
+			expect(modelChanges[0]?.modelHandleId).toBeTruthy();
+			expect(modelChanges[0]?.modelId).toBe("claude-3-5-haiku-latest");
+			expect(settingsManager.getDefaultModelHandleId()).toBeTruthy();
+			expect(settingsManager.getDefaultProvider()).toBe("anthropic");
 		} finally {
 			session.dispose();
 		}

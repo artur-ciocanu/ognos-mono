@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@mariozechner/pi-ai";
+import type { AgentRuntime } from "@mariozechner/pi-agent-core";
+import { getModel, type Model } from "@mariozechner/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
@@ -52,14 +53,26 @@ describe("AgentSession dynamic provider registration", () => {
 		return session;
 	}
 
+	async function syncAnthropicSessionModel(session: Awaited<ReturnType<typeof createSession>>) {
+		const model = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected anthropic/claude-sonnet-4-5 to be available in model registry");
+		}
+		await session.setModel(model);
+		return model;
+	}
+
 	async function capturePromptBaseUrl(
 		session: Awaited<ReturnType<typeof createSession>>,
 	): Promise<string | undefined> {
 		let baseUrl: string | undefined;
-		session.agent.streamFn = async (model) => {
-			baseUrl = model.baseUrl;
-			throw new Error("stop");
-		};
+		session.agent.runtime = {
+			configured: true,
+			async *stream(model) {
+				baseUrl = (model.raw as Model<any> | undefined)?.baseUrl;
+				yield { type: "error", error: new Error("stop") };
+			},
+		} satisfies AgentRuntime;
 		await session.prompt("hello");
 		return baseUrl;
 	}
@@ -71,7 +84,8 @@ describe("AgentSession dynamic provider registration", () => {
 			},
 		]);
 
-		expect(session.model?.baseUrl).toBe("http://localhost:8080/top-level");
+		await syncAnthropicSessionModel(session);
+		expect(session.model?.raw.baseUrl).toBe("http://localhost:8080/top-level");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/top-level");
 
 		session.dispose();
@@ -87,8 +101,9 @@ describe("AgentSession dynamic provider registration", () => {
 		]);
 
 		await session.bindExtensions({});
+		await syncAnthropicSessionModel(session);
 
-		expect(session.model?.baseUrl).toBe("http://localhost:8080/session-start");
+		expect(session.model?.raw.baseUrl).toBe("http://localhost:8080/session-start");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/session-start");
 
 		session.dispose();
@@ -108,8 +123,9 @@ describe("AgentSession dynamic provider registration", () => {
 
 		await session.bindExtensions({});
 		await session.prompt("/use-proxy");
+		await syncAnthropicSessionModel(session);
 
-		expect(session.model?.baseUrl).toBe("http://localhost:8080/command");
+		expect(session.model?.raw.baseUrl).toBe("http://localhost:8080/command");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/command");
 
 		session.dispose();
