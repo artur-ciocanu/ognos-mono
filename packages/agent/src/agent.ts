@@ -4,7 +4,7 @@
  */
 
 import type { ImageContent, Message, TextContent, ThinkingBudgets, Transport } from "@mariozechner/pi-ai";
-import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
+import type { ModelHandle } from "pi-baml-runtime";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import {
 	type AgentRuntime,

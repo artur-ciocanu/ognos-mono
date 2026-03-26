@@ -1,11 +1,11 @@
-# @mariozechner/pi-llm-runtime
+# pi-baml-runtime
 
 Shared runtime types for model handles and token usage across pi packages.
 
 ## Installation
 
 ```bash
-npm install @mariozechner/pi-llm-runtime
+npm install pi-baml-runtime
 ```
 
 ## Exports

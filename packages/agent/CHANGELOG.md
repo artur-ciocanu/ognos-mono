@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Migrated agent runtime integration to `@mariozechner/pi-llm-runtime`, replacing `Model<any>` with `ModelHandle` and requiring runtime implementations to be injected instead of defaulting to a built-in `pi-ai` execution path.
+- Migrated agent runtime integration to `pi-baml-runtime`, replacing `Model<any>` with `ModelHandle` and requiring runtime implementations to be injected instead of defaulting to a built-in `pi-ai` execution path.
 - Carried `systemPrompt` into injected runtimes as a leading runtime `system` message instead of an agent-only side channel.
 - Kept `toModelHandle()` and `createPiAiCompatRuntime()` as compatibility shims for existing `pi-ai` model objects while the runtime-boundary migration continues.
 

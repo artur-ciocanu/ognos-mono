@@ -18,7 +18,7 @@ import {
 	type Transport,
 	type UserMessage,
 } from "@mariozechner/pi-ai";
-import type { ModelHandle, RuntimeMessage, RuntimeUsage } from "@mariozechner/pi-llm-runtime";
+import type { ModelHandle, RuntimeMessage, RuntimeUsage } from "pi-baml-runtime";
 
 export interface AgentRuntimeContext {
 	messages: RuntimeMessage[];
@@ -319,7 +319,7 @@ export function createPiAiCompatRuntime(): AgentRuntime {
 					yield {
 						type: "error",
 						error: new Error(
-							"Pi-ai compatibility runtime requires ModelHandle.raw to contain a pi-ai model. Use a llm-runtime implementation or pass a compatible handle explicitly.",
+							"Pi-ai compatibility runtime requires ModelHandle.raw to contain a pi-ai model. Use a baml-runtime implementation or pass a compatible handle explicitly.",
 						),
 					};
 				})();

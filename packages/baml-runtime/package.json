@@ -1,5 +1,5 @@
 {
-	"name": "@mariozechner/pi-llm-runtime",
+	"name": "pi-baml-runtime",
 	"version": "0.62.0",
 	"description": "Shared runtime types for model handles and usage accounting",
 	"type": "module",
@@ -27,7 +27,7 @@
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/badlogic/pi-mono.git",
-		"directory": "packages/llm-runtime"
+		"directory": "packages/baml-runtime"
 	},
 	"engines": {
 		"node": ">=20.0.0"

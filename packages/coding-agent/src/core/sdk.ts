@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, createPiAiCompatRuntime, type ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
-import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
+import type { ModelHandle } from "pi-baml-runtime";
 import { getAgentDir, getDocsPath } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import { AuthStorage } from "./auth-storage.js";
