@@ -7,8 +7,8 @@ import type {
 	Tool,
 	ToolResultMessage,
 } from "@mariozechner/pi-ai";
-import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
 import type { Static, TSchema } from "@sinclair/typebox";
+import type { ModelHandle } from "pi-baml-runtime";
 import type { AgentRuntime, AgentRuntimeOptions } from "./runtime-bridge.js";
 
 /**

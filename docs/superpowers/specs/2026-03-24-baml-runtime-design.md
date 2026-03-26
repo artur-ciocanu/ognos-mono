@@ -41,15 +41,15 @@ This creates several forms of coupling:
 
 ## Proposed Architecture
 
-Introduce a new local package, referred to here as `llm-runtime`, backed by BAML.
+Introduce a new local package, referred to here as `baml-runtime`, backed by BAML.
 
 Target stack:
 
-`coding-agent` -> `pi-agent-core` -> `llm-runtime` -> BAML
+`coding-agent` -> `pi-agent-core` -> `baml-runtime` -> BAML
 
 ### Runtime Boundary
 
-`llm-runtime` owns:
+`baml-runtime` owns:
 
 - BAML client configuration
 - model discovery and local model metadata
@@ -232,7 +232,7 @@ Expected changes:
 
 This is a staged internal migration with a single public runtime path.
 
-1. Create `llm-runtime` and define local interfaces.
+1. Create `baml-runtime` and define local interfaces.
 2. Build the BAML-backed implementation for model discovery, invocation, streaming adaptation, and usage extraction.
 3. Migrate `pi-agent-core` to the new runtime interfaces.
 4. Migrate `coding-agent` model selection, persistence, and restore logic to `ModelHandle`.

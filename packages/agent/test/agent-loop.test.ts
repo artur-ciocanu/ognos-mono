@@ -1,6 +1,6 @@
 import type { AssistantMessage, Message, UserMessage } from "@mariozechner/pi-ai";
-import type { ModelHandle, RuntimeUsage } from "@mariozechner/pi-llm-runtime";
 import { Type } from "@sinclair/typebox";
+import type { ModelHandle, RuntimeUsage } from "pi-baml-runtime";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
 import type {

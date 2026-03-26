@@ -599,7 +599,7 @@ MIT
 
 ## See Also
 
-- [@mariozechner/pi-llm-runtime](https://www.npmjs.com/package/@mariozechner/pi-llm-runtime): Runtime boundary and `ModelHandle` types
+- [pi-baml-runtime](https://www.npmjs.com/package/pi-baml-runtime): Runtime boundary and `ModelHandle` types
 - [@mariozechner/pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai): Provider catalogs and compatibility helpers still used during migration
 - [@mariozechner/pi-agent-core](https://www.npmjs.com/package/@mariozechner/pi-agent-core): Agent runtime
 - [@mariozechner/pi-tui](https://www.npmjs.com/package/@mariozechner/pi-tui): Terminal UI components

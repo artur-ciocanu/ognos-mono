@@ -1,7 +1,7 @@
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
 import { getModel } from "@mariozechner/pi-ai";
-import type { ModelHandle } from "@mariozechner/pi-llm-runtime";
 import { Type } from "@sinclair/typebox";
+import type { ModelHandle } from "pi-baml-runtime";
 import { describe, expect, it } from "vitest";
 import { Agent, createPiAiCompatRuntime, toModelHandle } from "../src/index.js";
 import type { AgentTool } from "../src/types.js";

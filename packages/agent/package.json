@@ -17,7 +17,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@mariozechner/pi-llm-runtime": "^0.62.0",
+		"pi-baml-runtime": "^0.62.0",
 		"@mariozechner/pi-ai": "^0.62.0"
 	},
 	"keywords": [

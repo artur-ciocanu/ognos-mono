@@ -1,6 +1,6 @@
 # @mariozechner/pi-agent-core
 
-Stateful agent with tool execution and event streaming. `pi-agent-core` now executes against an injected runtime boundary from `@mariozechner/pi-llm-runtime` and stores model identity as `ModelHandle`.
+Stateful agent with tool execution and event streaming. `pi-agent-core` now executes against an injected runtime boundary from `pi-baml-runtime` and stores model identity as `ModelHandle`.
 
 ## Installation
 
@@ -8,14 +8,14 @@ Stateful agent with tool execution and event streaming. `pi-agent-core` now exec
 npm install @mariozechner/pi-agent-core
 ```
 
-Install `@mariozechner/pi-llm-runtime` as well if you want the shared runtime types or the built-in BAML runtime adapter.
+Install `pi-baml-runtime` as well if you want the shared runtime types or the built-in BAML runtime adapter.
 
 ## Quick Start
 
 ```typescript
 import { Agent } from "@mariozechner/pi-agent-core";
-import type { LlmRuntime, ModelHandle } from "@mariozechner/pi-llm-runtime";
-import { BamlRuntime } from "@mariozechner/pi-llm-runtime";
+import type { LlmRuntime, ModelHandle } from "pi-baml-runtime";
+import { BamlRuntime } from "pi-baml-runtime";
 
 const runtime: LlmRuntime = new BamlRuntime(client);
 const model: ModelHandle = {
@@ -428,7 +428,7 @@ For browser apps that proxy through a backend, inject a runtime implementation a
 
 ```typescript
 import { Agent } from "@mariozechner/pi-agent-core";
-import type { LlmRuntime } from "@mariozechner/pi-llm-runtime";
+import type { LlmRuntime } from "pi-baml-runtime";
 
 const runtime: LlmRuntime = createRuntimeSomehow();
 
@@ -458,7 +458,7 @@ For direct control without the Agent class:
 
 ```typescript
 import { agentLoop, agentLoopContinue } from "@mariozechner/pi-agent-core";
-import type { LlmRuntime, ModelHandle } from "@mariozechner/pi-llm-runtime";
+import type { LlmRuntime, ModelHandle } from "pi-baml-runtime";
 
 const context: AgentContext = {
   systemPrompt: "You are helpful.",
